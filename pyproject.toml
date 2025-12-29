@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "llamaindex-pgvector-pdfs"
+version = "0.1.0"
+description = "LlamaIndex + Postgres/pgvector with OpenAI & Groq (uv-managed)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "llama-index>=0.11.0",
+  "llama-index-vector-stores-postgres>=0.2.0",
+  "openai>=1.40.0",
+  "groq>=0.9.0",
+  "psycopg[binary]>=3.1.0",
+  "pgvector>=0.2.5",
+  "python-dotenv>=1.0.0",
+  "pymupdf>=1.26.4",
+  "pymupdf4llm>=0.0.27",
+  "spacy>=3.8.7",
+  "pip>=25.2",
+  "pydantic>=2.11.9",
+  "google-genai>=1.55.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.6.0",
+  "black>=24.0.0",
+  "pytest>=8.0.0",
+  "mypy>=1.10.0",
+  "ipython>=8.0.0",
+]
+
+# Include everything under src/ as packages (src/ has __init__.py and package dirs)
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/**", "pyproject.toml", "README.md"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.black]
+line-length = 100
