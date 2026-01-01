@@ -68,3 +68,10 @@ logs/
 *.tmp
 *.temp
 
+# Experimental scripts
+analyze_retrieval_vs_answer_quality.py
+extract_correct_answers_with_failed_retrieval.py
+gemini_answer_generation.py
+gemini_filesearch.py
+gemini_filesearch_retrieval_evaluation.py
+
