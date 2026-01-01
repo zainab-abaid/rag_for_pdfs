@@ -6,12 +6,29 @@ HNSW (Hierarchical Navigable Small World) indexes are much faster than
 sequential scans for vector similarity queries. This script creates
 HNSW indexes on the vector embedding column.
 
-Note: Creating indexes can take a while on large tables, but it's a
-one-time operation that significantly speeds up retrieval.
+The script is idempotent (safe to run multiple times) - it only creates
+indexes that don't already exist.
+
+Use --check flag to see current status without making changes:
+  python src/setup/create_hnsw_indexes.py --check
+
+Environment Variables (required):
+  PG_HOST: PostgreSQL host (default: localhost)
+  PG_PORT: PostgreSQL port (default: 5432)
+  PG_DB: Database name
+  PG_SCHEMA: Schema name
+  PG_TABLE: Table name (default: idx_section_based_chunking)
+  PG_USER: Database user
+  PG_PASSWORD: Database password
+  HNSW_M: Number of connections per layer (default: 16)
+  HNSW_EF_CONSTRUCTION: Size of candidate list during construction (default: 64)
+  EMBED_DIM: Embedding dimensions (default: 1536)
 """
 
+from __future__ import annotations
 import os
 import sys
+import argparse
 
 try:
     from dotenv import load_dotenv
@@ -37,6 +54,7 @@ PG_PASSWORD = os.environ.get("PG_PASSWORD", "")
 # HNSW index parameters (can be tuned)
 HNSW_M = int(os.environ.get("HNSW_M", "16"))  # Number of connections per layer (default: 16)
 HNSW_EF_CONSTRUCTION = int(os.environ.get("HNSW_EF_CONSTRUCTION", "64"))  # Size of candidate list during construction
+EMBED_DIM = int(os.environ.get("EMBED_DIM", "1536"))  # Embedding dimensions
 
 # Validate required variables
 if not PG_DB:
@@ -64,7 +82,7 @@ def check_table_exists(conn, schema: str, table: str) -> bool:
         return cur.fetchone() is not None
 
 
-def check_data_table(conn, schema: str, base_table: str) -> str:
+def check_data_table(conn, schema: str, base_table: str) -> str | None:
     """Find the actual data table."""
     if check_table_exists(conn, schema, base_table):
         return base_table
@@ -74,7 +92,7 @@ def check_data_table(conn, schema: str, base_table: str) -> str:
     return None
 
 
-def get_vector_columns(conn, schema: str, table: str):
+def get_vector_columns(conn, schema: str, table: str) -> list[str]:
     """Get all vector columns in the table."""
     with conn.cursor() as cur:
         cur.execute(
@@ -107,9 +125,54 @@ def index_exists(conn, schema: str, table: str, index_name: str) -> bool:
         return cur.fetchone() is not None
 
 
-def create_hnsw_index(conn, schema: str, table: str, column: str, distance_op: str = "vector_cosine_ops"):
+def check_hnsw_indexes(conn, schema: str, table: str, vector_cols: list[str]) -> dict[str, bool]:
+    """
+    Check which HNSW indexes exist for the vector columns.
+    Returns dict mapping column_name -> exists (bool)
+    """
+    results = {}
+    for col in vector_cols:
+        index_name = f"{table}_{col}_hnsw_idx"
+        results[col] = index_exists(conn, schema, table, index_name)
+    return results
+
+
+def verify_index_usage(conn, schema: str, table: str, vector_col: str) -> bool:
+    """
+    Verify that HNSW index is being used by running EXPLAIN ANALYZE.
+    Returns True if index is being used, False otherwise.
+    """
+    fqtn = f'"{schema}"."{table}"'
+    
+    # Create a dummy embedding vector for testing
+    dummy_vector = "[" + ",".join(["0.1"] * EMBED_DIM) + "]"
+    
+    query = f"""
+        EXPLAIN (ANALYZE, BUFFERS, VERBOSE)
+        SELECT id, {vector_col} <=> %s::vector AS distance
+        FROM {fqtn}
+        ORDER BY {vector_col} <=> %s::vector
+        LIMIT 10
+    """
+    
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query, (dummy_vector, dummy_vector))
+            plan = cur.fetchall()
+            
+            # Check if HNSW index is mentioned in the plan
+            plan_text = "\n".join([row[0] for row in plan])
+            if "Index Scan" in plan_text or "Bitmap Index Scan" in plan_text:
+                return True
+            return False
+    except psycopg.Error:
+        return False
+
+
+def create_hnsw_index(conn, schema: str, table: str, column: str, distance_op: str = "vector_cosine_ops") -> bool:
     """
     Create HNSW index on a vector column.
+    Returns True if index was created, False if it already existed.
     
     distance_op options:
     - vector_cosine_ops: for cosine similarity (most common)
@@ -119,10 +182,11 @@ def create_hnsw_index(conn, schema: str, table: str, column: str, distance_op: s
     index_name = f"{table}_{column}_hnsw_idx"
     
     if index_exists(conn, schema, table, index_name):
-        print(f"  ⚠ Index '{index_name}' already exists, skipping...")
+        print(f"  ✓ Index '{index_name}' already exists, skipping...")
         return False
     
     print(f"  Creating HNSW index '{index_name}' on {column}...")
+    print(f"    This may take a while for large tables...")
     
     with conn.cursor() as cur:
         # Create index with HNSW
@@ -145,18 +209,29 @@ def create_hnsw_index(conn, schema: str, table: str, column: str, distance_op: s
 
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Create HNSW indexes on vector columns for fast similarity search"
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Check status only (don't create anything)"
+    )
+    args = parser.parse_args()
+
     print("=" * 70)
-    print("Create HNSW Indexes for Vector Search")
+    if args.check:
+        print("HNSW Index Status Check")
+    else:
+        print("Create HNSW Indexes for Vector Search")
     print("=" * 70)
     print(f"Host: {PG_HOST}:{PG_PORT}")
     print(f"Database: {PG_DB}")
     print(f"Schema: {PG_SCHEMA}")
     print(f"Table: {PG_TABLE}")
-    print(f"HNSW Parameters: m={HNSW_M}, ef_construction={HNSW_EF_CONSTRUCTION}")
+    if not args.check:
+        print(f"HNSW Parameters: m={HNSW_M}, ef_construction={HNSW_EF_CONSTRUCTION}")
     print("=" * 70)
-    print()
-    print("NOTE: Creating indexes can take several minutes on large tables.")
-    print("      This is a one-time operation that significantly speeds up retrieval.")
     print()
 
     try:
@@ -187,23 +262,68 @@ def main():
             print(f"✓ Found {len(vector_cols)} vector column(s): {', '.join(vector_cols)}")
             print()
 
-            # Create indexes
-            created = 0
-            for col in vector_cols:
-                if create_hnsw_index(conn, PG_SCHEMA, actual_table, col):
-                    created += 1
+            if args.check:
+                # Check-only mode
+                index_status = check_hnsw_indexes(conn, PG_SCHEMA, actual_table, vector_cols)
+                
+                print("HNSW Index Status:")
+                all_exist = True
+                for col in vector_cols:
+                    exists = index_status[col]
+                    status = "✓ EXISTS" if exists else "✗ MISSING"
+                    print(f"  {col}: {status}")
+                    if not exists:
+                        all_exist = False
                 print()
 
-            print("=" * 70)
-            if created > 0:
-                print(f"✓ Successfully created {created} HNSW index(es)")
-                print("  Vector similarity search should now be much faster!")
+                # Verify index usage if indexes exist
+                if all_exist:
+                    print("Verifying index usage...")
+                    index_used = False
+                    for col in vector_cols:
+                        if verify_index_usage(conn, PG_SCHEMA, actual_table, col):
+                            index_used = True
+                            break
+                    
+                    if index_used:
+                        print("  ✓ HNSW index is being used for vector queries")
+                    else:
+                        print("  ⚠ HNSW index exists but may not be used (this can happen with small tables)")
+                    print()
+
+                print("=" * 70)
+                if all_exist:
+                    print("✓ All HNSW indexes exist! Vector search should be fast.")
+                else:
+                    print("⚠ Some HNSW indexes are missing. This will slow down vector searches.")
+                    print()
+                    print("To create missing indexes, run:")
+                    print("  python src/setup/create_hnsw_indexes.py")
+                print("=" * 70)
             else:
-                print("⚠ No new indexes created (they may already exist)")
-            print("=" * 70)
-            print()
-            print("You can verify indexes with:")
-            print("  python src/setup/check_indexes.py")
+                # Create mode
+                print("NOTE: Creating indexes can take several minutes on large tables.")
+                print("      This is a one-time operation that significantly speeds up retrieval.")
+                print()
+
+                # Create indexes
+                created = 0
+                for col in vector_cols:
+                    if create_hnsw_index(conn, PG_SCHEMA, actual_table, col):
+                        created += 1
+                    print()
+
+                print("=" * 70)
+                if created > 0:
+                    print(f"✓ Successfully created {created} HNSW index(es)")
+                    print("  Vector similarity search should now be much faster!")
+                else:
+                    print("✓ All HNSW indexes already exist (nothing to create)")
+                    print("  Vector search should be fast!")
+                print("=" * 70)
+                print()
+                print("To verify indexes, run:")
+                print("  python src/setup/create_hnsw_indexes.py --check")
 
     except psycopg.Error as e:
         print(f"ERROR: Database operation failed: {e}")
@@ -212,4 +332,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
