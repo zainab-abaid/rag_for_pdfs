@@ -15,10 +15,13 @@ Environment Variables (REQUIRED):
     RETRIEVAL_LOG_CSV or retrieval_log_csv: Path to retrieval log CSV (from retrieve_and_stitch.py)
     ANSWER_LOG_CSV or answer_log_csv: Path to answer log CSV (from generate_answers.py)
     ANSWER_EVAL_OUTPUT_CSV or answer_eval_output_csv: Output path for evaluation results (e.g., logs/answer_eval_log.csv)
-    OPENAI_API_KEY: Required for API calls
+    OPENAI_API_KEY: Required for API calls (when USE_GROQ=false)
+    GROQ_API_KEY: Required for API calls (when USE_GROQ=true)
 
 Environment Variables (OPTIONAL):
-    JUDGE_MODEL: Model to use for judging (default: gpt-4o)
+    USE_GROQ: Set to 'true' to use Groq API instead of OpenAI (default: false)
+    JUDGE_MODEL: Model to use for judging when USE_GROQ=false (default: gpt-4o)
+    GROQ_MODEL: Model to use for judging when USE_GROQ=true (required when USE_GROQ=true)
 """
 
 import os
@@ -45,15 +48,33 @@ except Exception:
 try:
     from openai import OpenAI
 except ImportError:
-    raise SystemExit("openai package not installed. Run: pip install openai")
+    OpenAI = None
+
+# Groq client
+try:
+    from groq import Groq
+except ImportError:
+    Groq = None
 
 
 def get_openai_client() -> OpenAI:
     """Get OpenAI client from environment."""
+    if OpenAI is None:
+        raise SystemExit("openai package not installed. Run: pip install openai")
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise SystemExit("OPENAI_API_KEY not set in environment.")
     return OpenAI(api_key=api_key)
+
+
+def get_groq_client() -> Groq:
+    """Get Groq client from environment."""
+    if Groq is None:
+        raise SystemExit("groq package not installed. Run: pip install groq")
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise SystemExit("GROQ_API_KEY not set in environment.")
+    return Groq(api_key=api_key)
 
 
 def judge_answer(
@@ -205,8 +226,19 @@ def main():
         raise SystemExit(f"ERROR: Answer log file not found: {answer_log_path!r}\n"
                         "Run generate_answers.py or gemini_filesearch.py first to create the answer log.")
     
-    # Model settings
-    judge_model = os.getenv("JUDGE_MODEL", "gpt-4o").strip() or "gpt-4o"
+    # Check if Groq should be used
+    use_groq = (os.getenv("USE_GROQ") or os.getenv("use_groq") or "").strip().lower() == "true"
+    
+    # Model settings - depends on whether Groq is enabled
+    if use_groq:
+        judge_model = os.getenv("GROQ_MODEL") or os.getenv("groq_model")
+        if judge_model:
+            judge_model = judge_model.strip()
+        if not judge_model:
+            raise SystemExit("ERROR: GROQ_MODEL environment variable is required when USE_GROQ=true.\n"
+                            "Set it to the Groq model you want to use (e.g., llama-3.3-70b-versatile)")
+    else:
+        judge_model = os.getenv("JUDGE_MODEL", "gpt-4o").strip() or "gpt-4o"
     
     # REQUIRED: answer_eval_output_csv (evaluation output path)
     eval_out = get_env_path("ANSWER_EVAL_OUTPUT_CSV", "answer_eval_output_csv")
@@ -221,11 +253,15 @@ def main():
     print(f"Answer log file     : {answer_log_path}")
     print(f"Evaluation output   : {eval_out}")
     print(f"Judge model         : {judge_model}")
+    print(f"API provider        : {'Groq' if use_groq else 'OpenAI'}")
     print("=" * 80)
     print()
     
-    # Get OpenAI client
-    client = get_openai_client()
+    # Get appropriate client
+    if use_groq:
+        client = get_groq_client()
+    else:
+        client = get_openai_client()
     
     # Load retrieval log
     log_rows = []
