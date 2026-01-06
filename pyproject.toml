@@ -23,6 +23,7 @@ dependencies = [
   "pydantic>=2.11.9",
   "google-genai>=1.55.0",
   "langchain>=0.3,<0.4",
+  "tqdm>=4.66"
 ]
 
 [project.optional-dependencies]

@@ -83,6 +83,7 @@ from llama_index.core.node_parser import (
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from llama_index.core.node_parser import LangchainNodeParser, SimpleNodeParser
+from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.core.schema import BaseNode
 from src.catalog.drop_titles import DROP_TITLES
 from collections import defaultdict
@@ -132,8 +133,12 @@ def get_node_parser(strategy: str):
             return TokenTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
         case "sentence":
             return SentenceSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
-        case "semantic":
-            return SemanticSplitterNodeParser(chunk_size=CHUNK_SIZE)
+        case "semantic": # this one will be expensive
+            embed_model = OpenAIEmbedding()
+            return SemanticSplitterNodeParser(
+                embed_model=embed_model,
+                chunk_size=CHUNK_SIZE
+            )
         case "recursive":
             splitter = RecursiveCharacterTextSplitter(
             chunk_size = CHUNK_SIZE,

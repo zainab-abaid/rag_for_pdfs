@@ -1255,6 +1255,7 @@ dependencies = [
     { name = "pymupdf4llm" },
     { name = "python-dotenv" },
     { name = "spacy" },
+    { name = "tqdm" },
 ]
 
 [package.optional-dependencies]
@@ -1287,6 +1288,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6.0" },
     { name = "spacy", specifier = ">=3.8.7" },
+    { name = "tqdm", specifier = ">=4.66" },
 ]
 provides-extras = ["dev"]
 
