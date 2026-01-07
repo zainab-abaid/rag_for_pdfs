@@ -6,7 +6,14 @@ This script:
 1. Reads the retrieval log CSV (from retrieve_and_stitch.py)
 2. Loads generated answers from the answer log CSV
 3. Compares generated answers against ground truth using an LLM judge (gpt-4o)
-4. Outputs evaluation results with judge scores (0/1) and statistics
+4. Outputs a simplified evaluation log with only essential columns:
+   - question
+   - gt_answer (ground truth answer)
+   - llm_answer (generated answer)
+   - retrieved_context (top-K context used)
+   - gt_in_topK (whether ground truth was in top-K)
+   - judge_score (0 or 1)
+   - judge_reasoning
 
 Usage:
     uv run python src/evaluation/evaluate_answers.py
@@ -185,6 +192,30 @@ def get_env_path(up: str, low: str, default: str = "") -> str:
     return os.getenv(up) or os.getenv(low) or default
 
 
+def check_gt_in_topK(gt_section_id: str, retrieved_context_json: str) -> bool:
+    """
+    Check if ground truth section ID is in the top-K retrieved context.
+    Returns True if GT is in top-K, False otherwise.
+    """
+    if not gt_section_id or not retrieved_context_json:
+        return False
+    
+    try:
+        blocks = json.loads(retrieved_context_json)
+        if not isinstance(blocks, list):
+            return False
+        
+        # Check if gt_section_id appears in any of the retrieved blocks
+        for block in blocks:
+            if isinstance(block, dict):
+                section_id = block.get("section_id", "")
+                if section_id == gt_section_id:
+                    return True
+        return False
+    except Exception:
+        return False
+
+
 def load_answer_log(answer_log_path: Path) -> Dict[str, str]:
     """Load generated answers from log file."""
     if not answer_log_path.exists():
@@ -267,7 +298,7 @@ def main():
     log_rows = []
     with open(log_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        required = {"question", "answer"}
+        required = {"question", "answer", "retrieved_context"}
         missing = required - set(reader.fieldnames or [])
         if missing:
             raise SystemExit(f"Log file missing required columns: {missing}\n"
@@ -282,10 +313,16 @@ def main():
     generated_answers = load_answer_log(Path(answer_log_path))
     print(f"Loaded {len(generated_answers)} answers with non-empty content from log")
     
-    # Prepare output CSV
-    base_fields = list(log_rows[0].keys())
-    extra_fields = ["generated_answer", "judge_score", "judge_reasoning"]
-    out_fields = base_fields + extra_fields
+    # Prepare simplified output CSV with only essential columns
+    out_fields = [
+        "question",
+        "gt_answer",
+        "llm_answer",
+        "retrieved_context",
+        "gt_in_topK",
+        "judge_score",
+        "judge_reasoning"
+    ]
     
     total = len(log_rows)
     accurate_count = 0
@@ -303,6 +340,11 @@ def main():
             question = (row.get("question") or "").strip()
             ground_truth_answer = (row.get("answer") or "").strip()
             generated_answer = generated_answers.get(question, "")
+            retrieved_context = row.get("retrieved_context", "")
+            gt_section_id = row.get("gt_section_id", "")
+            
+            # Check if GT is in top-K
+            gt_in_topK = check_gt_in_topK(gt_section_id, retrieved_context)
             
             if not generated_answer:
                 missing_answers += 1
@@ -320,11 +362,16 @@ def main():
                 if judge_score == 1:
                     accurate_count += 1
             
-            # Write output row
-            out_row = dict(row)
-            out_row["generated_answer"] = generated_answer
-            out_row["judge_score"] = judge_score
-            out_row["judge_reasoning"] = judge_reasoning
+            # Write simplified output row
+            out_row = {
+                "question": question,
+                "gt_answer": ground_truth_answer,
+                "llm_answer": generated_answer,
+                "retrieved_context": retrieved_context,
+                "gt_in_topK": "True" if gt_in_topK else "False",
+                "judge_score": judge_score,
+                "judge_reasoning": judge_reasoning
+            }
             writer.writerow(out_row)
             
             # Progress
