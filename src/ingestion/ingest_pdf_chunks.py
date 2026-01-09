@@ -44,7 +44,6 @@ Environment variables (from .env):
   EMBED_MODEL=text-embedding-3-small    # OpenAI embedding model
   EMBED_DIM=1536                        # Dimension of embeddings
   EMBED_BATCH_SIZE=100                  # Number of nodes per API request
-  MAX_CONCURRENT=5                      # Number of parallel embedding requests
 
   PDF_PARSED_OUTPUT_DIR=./data/pdf_node_chunks   # Directory containing node .pkl files
 
@@ -60,14 +59,12 @@ Design choices:
 
 import os
 import pickle
-import asyncio
 from pathlib import Path
 from typing import List, Dict, Any
-from tqdm import tqdm
 
 import psycopg
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
+from openai import OpenAI
 
 load_dotenv()
 
@@ -83,19 +80,17 @@ OVERWRITE_TABLE = os.getenv("OVERWRITE_TABLE", "false").lower() == "true"
 
 EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-3-small")
 EMBED_DIM = int(os.getenv("EMBED_DIM", "1536"))
-EMBED_BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "100")) 
-MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "5"))  # Parallel API calls
+EMBED_BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "100"))
 
 NODES_DIR = Path(os.getenv("PDF_PARSED_OUTPUT_DIR", "./data/pdf_node_chunks"))
 
 
 #------------------Utility Functions-----------
-def load_nodes(node_file: Path) -> List[Any]:
+def load_nodes(node_file: Path) -> List[Dict[str, Any]]:
     """Load nodes from a .pkl file"""
     with open(node_file, "rb") as f:
         return pickle.load(f)
     
-
 def create_table_if_needed(conn):
     """Create table for storing PDF chunks and embeddings"""
     fqtn = f'"{PG_SCHEMA}"."{PG_TABLE_PDF}"'
@@ -106,7 +101,7 @@ def create_table_if_needed(conn):
 
         # Create table if not exists
         cur.execute(f"""
-            CREATE TABLE IF NOT EXISTS {fqtn} (
+                CREATE TABLE IF NOT EXISTS {fqtn} (
                 id SERIAL PRIMARY KEY,
                 source_file TEXT NOT NULL,
                 chunk_index INT NOT NULL,
@@ -114,148 +109,122 @@ def create_table_if_needed(conn):
                 embedding vector({EMBED_DIM}) NOT NULL
             );
         """)
-        
-        # Check if index exists
-        cur.execute(f"""
-            SELECT indexname FROM pg_indexes 
-            WHERE schemaname = %s AND tablename = %s AND indexname = 'pdf_chunks_embedding_idx';
-        """, (PG_SCHEMA, PG_TABLE_PDF))
-        
-        if not cur.fetchone():
-            print(f"[ingest] Creating vector index (this may take a while)...")
-            cur.execute(f"""
-                CREATE INDEX pdf_chunks_embedding_idx 
-                ON {fqtn} USING ivfflat (embedding vector_cosine_ops)
-                WITH (lists = 100);
-            """)
-        
         conn.commit()
     
     print(f"[ingest] Table ready: {fqtn}")
 
+def generate_embedding(client: OpenAI, text: str):
+    """Generate embedding vector using OpenAI"""
+    response = client.embeddings.create(
+        model=EMBED_MODEL,
+        input=text
+    )
+    return response.data[0].embedding
 
-async def generate_embeddings_batch(client: AsyncOpenAI, texts: List[str], max_retries: int = 3) -> List[List[float]]:
-    """Generate embeddings with retry logic"""
-    for attempt in range(max_retries):
-        try:
-            response = await client.embeddings.create(
-                model=EMBED_MODEL,
-                input=texts
-            )
-            return [item.embedding for item in response.data]
-        except Exception as e:
-            if attempt == max_retries - 1:
-                raise
-            wait_time = 2 ** attempt  # Exponential backoff
-            print(f"[ingest] API error (attempt {attempt + 1}/{max_retries}): {e}")
-            print(f"[ingest] Retrying in {wait_time}s...")
-            await asyncio.sleep(wait_time)
-
-
-async def process_batch(client: AsyncOpenAI, batch_data: List[tuple], semaphore: asyncio.Semaphore) -> List[tuple]:
-    """Process a single batch with rate limiting"""
-    async with semaphore:
-        texts = [text for _, _, text in batch_data]
-        embeddings = await generate_embeddings_batch(client, texts)
-        return [
-            (src, idx, txt, emb) 
-            for (src, idx, txt), emb in zip(batch_data, embeddings)
-        ]
-
-
-async def insert_nodes_async(conn_params: dict, nodes: List[Any], client: AsyncOpenAI, batch_size: int = 2048):
-    """Insert nodes into PostgreSQL with async embedding generation"""
+def insert_nodes(conn, nodes: List[Dict[str, Any]], client: OpenAI, batch_size: int = 100):
+    """Insert nodes into PostgreSQL with embeddings, with batching and progress logging."""
     fqtn = f'"{PG_SCHEMA}"."{PG_TABLE_PDF}"'
-    
-    # Prepare all data
-    all_data = []
+    total_inserted = 0
+    batch_nodes = []
+    batch_texts = []
+
     for node in nodes:
         text = node.text
         source_file = node.metadata.get("source_file", "unknown.pdf")
         chunk_index = node.metadata.get("chunk_index", 0)
-        all_data.append((source_file, chunk_index, text))
-    
-    # Split into batches
-    batches = [all_data[i:i + batch_size] for i in range(0, len(all_data), batch_size)]
-    
-    # Semaphore to limit concurrent API calls
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT)
-    
-    # Process all batches concurrently with progress bar
-    print(f"[ingest] Processing {len(batches)} batches ({len(nodes)} nodes)...")
-    
-    tasks = [process_batch(client, batch, semaphore) for batch in batches]
-    results = []
-    
-    for coro in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Embedding"):
-        result = await coro
-        results.append(result)
-    
-    # Insert all results into database
-    print(f"[ingest] Inserting {len(nodes)} nodes into database...")
-    with psycopg.connect(**conn_params) as conn:
-        with conn.cursor() as cur:
-            for batch_result in tqdm(results, desc="Inserting"):
+
+        batch_nodes.append((source_file, chunk_index, text))
+        batch_texts.append(text)
+
+        # When batch is full, generate embeddings and insert
+        if len(batch_nodes) >= batch_size:
+            # Generate embeddings in batch
+            response = client.embeddings.create(model=EMBED_MODEL, input=batch_texts)
+            embeddings = [item.embedding for item in response.data]
+
+            # Prepare rows for insertion
+            rows_to_insert = [
+                (src, idx, txt, emb) for (src, idx, txt), emb in zip(batch_nodes, embeddings)
+            ]
+
+            # Insert batch
+            with conn.cursor() as cur:
                 cur.executemany(
                     f"INSERT INTO {fqtn} (source_file, chunk_index, text, embedding) VALUES (%s, %s, %s, %s)",
-                    batch_result
+                    rows_to_insert
                 )
+            conn.commit()
+
+            total_inserted += len(rows_to_insert)
+            if total_inserted % 500 == 0:
+                print(f"[ingest] {total_inserted} nodes inserted so far...")
+
+            # Clear batches
+            batch_nodes.clear()
+            batch_texts.clear()
+
+    # Insert any remaining nodes
+    if batch_nodes:
+        response = client.embeddings.create(model=EMBED_MODEL, input=batch_texts)
+        embeddings = [item.embedding for item in response.data]
+        rows_to_insert = [
+            (src, idx, txt, emb) for (src, idx, txt), emb in zip(batch_nodes, embeddings)
+        ]
+
+        with conn.cursor() as cur:
+            cur.executemany(
+                f"INSERT INTO {fqtn} (source_file, chunk_index, text, embedding) VALUES (%s, %s, %s, %s)",
+                rows_to_insert
+            )
         conn.commit()
-    
-    print(f"[ingest] ✓ Inserted {len(nodes)} nodes")
+        total_inserted += len(rows_to_insert)
+
+    print(f"[ingest] Inserted {total_inserted} nodes into {fqtn}")
 
 
-async def main_async():
-    # Connection parameters
-    conn_params = {
-        "host": PG_HOST,
-        "port": PG_PORT,
-        "dbname": PG_DB,
-        "user": PG_USER,
-        "password": PG_PASSWORD
-    }
-    
-    # Setup database
-    with psycopg.connect(**conn_params) as conn:
+def main():
+    # Connect to PostgreSQL
+    with psycopg.connect(
+        host=PG_HOST,
+        port=PG_PORT,
+        dbname=PG_DB,
+        user=PG_USER,
+        password=PG_PASSWORD
+    ) as conn:
         create_table_if_needed(conn)
-    
-    # Initialize async OpenAI client with context manager
-    async with AsyncOpenAI() as client:
+
+        # Initialize OpenAI client
+        client = OpenAI()
+
         # Discover node files
         node_files = sorted(NODES_DIR.rglob("*.pkl"))
-        print(f"\n[ingest] Found {len(node_files)} node files in {NODES_DIR}")
+        print(f"[ingest] Found {len(node_files)} node files in {NODES_DIR}")
         print(f"[ingest] Embedding model: {EMBED_MODEL}")
-        print(f"[ingest] Batch size: {EMBED_BATCH_SIZE}")
-        print(f"[ingest] Max concurrent API calls: {MAX_CONCURRENT}")
+        print(f"[ingest] Embed batch size: {EMBED_BATCH_SIZE}")
         print("-" * 60)
-        
+
         grand_total = 0
-        
+
         for idx, node_file in enumerate(node_files, start=1):
             nodes = load_nodes(node_file)
-            
+
             print(
-                f"\n[ingest] ({idx}/{len(node_files)}) "
+                f"[ingest] ({idx}/{len(node_files)}) "
                 f"Processing {node_file.relative_to(NODES_DIR)} "
                 f"({len(nodes)} nodes)"
             )
-            
-            await insert_nodes_async(
-                conn_params=conn_params,
+
+            insert_nodes(
+                conn=conn,
                 nodes=nodes,
                 client=client,
                 batch_size=EMBED_BATCH_SIZE
             )
-            
+
             grand_total += len(nodes)
-        
-        print("\n" + "=" * 60)
-        print(f"[ingest] ✓ DONE — total nodes processed: {grand_total}")
-        print("=" * 60)
 
-
-def main():
-    asyncio.run(main_async())
+        print("-" * 60)
+        print(f"[ingest] DONE — total nodes processed: {grand_total}")
 
 
 if __name__ == "__main__":
