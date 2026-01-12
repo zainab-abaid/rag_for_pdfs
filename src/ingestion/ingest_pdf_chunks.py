@@ -65,6 +65,7 @@ from typing import List, Dict, Any
 import psycopg
 from dotenv import load_dotenv
 from openai import OpenAI
+import json
 
 load_dotenv()
 
@@ -106,7 +107,9 @@ def create_table_if_needed(conn):
                 source_file TEXT NOT NULL,
                 chunk_index INT NOT NULL,
                 text TEXT NOT NULL,
-                embedding vector({EMBED_DIM}) NOT NULL
+                embedding vector({EMBED_DIM}) NOT NULL,
+                metadata jsonb NOT NULL,
+                text_search_tsv tsvector
             );
         """)
         conn.commit()
@@ -122,12 +125,50 @@ def generate_embedding(client: OpenAI, text: str):
     return response.data[0].embedding
 
 def insert_nodes(conn, nodes: List[Dict[str, Any]], client: OpenAI, batch_size: int = 100):
-    """Insert nodes into PostgreSQL with embeddings, with batching and progress logging."""
+    """Insert nodes into PostgreSQL with embeddings, batching, metadata, and tsvector"""
     fqtn = f'"{PG_SCHEMA}"."{PG_TABLE_PDF}"'
     total_inserted = 0
     batch_nodes = []
     batch_texts = []
 
+    def flush_batch():
+        nonlocal batch_nodes, batch_texts, total_inserted
+        if not batch_nodes:
+            return
+
+        # Generate embeddings for batch
+        response = client.embeddings.create(model=EMBED_MODEL, input=batch_texts)
+        embeddings = [item.embedding for item in response.data]
+
+        # Prepare rows for insertion
+        rows_to_insert = [
+            (
+                txt,  # text
+                json.dumps({"doc_title": os.path.basename(src)}),  # metadata
+                idx,  # chunk_index
+                src,  # source_file
+                emb,  # embedding
+                txt   # for tsvector
+            )
+            for (src, idx, txt), emb in zip(batch_nodes, embeddings)
+        ]
+
+        # Insert batch
+        with conn.cursor() as cur:
+            cur.executemany(
+                f"""INSERT INTO {fqtn} (text, metadata, chunk_index, source_file, embedding, text_search_tsv) VALUES (%s, %s, %s, %s, %s, to_tsvector('english', %s))""",
+                rows_to_insert
+            )
+        conn.commit()
+
+        total_inserted += len(rows_to_insert)
+        if total_inserted % 500 == 0:
+            print(f"[ingest] {total_inserted} nodes inserted so far...")
+
+        batch_nodes.clear()
+        batch_texts.clear()
+
+    # ---------------- Process nodes ----------------
     for node in nodes:
         text = node.text
         source_file = node.metadata.get("source_file", "unknown.pdf")
@@ -136,49 +177,11 @@ def insert_nodes(conn, nodes: List[Dict[str, Any]], client: OpenAI, batch_size: 
         batch_nodes.append((source_file, chunk_index, text))
         batch_texts.append(text)
 
-        # When batch is full, generate embeddings and insert
         if len(batch_nodes) >= batch_size:
-            # Generate embeddings in batch
-            response = client.embeddings.create(model=EMBED_MODEL, input=batch_texts)
-            embeddings = [item.embedding for item in response.data]
+            flush_batch()
 
-            # Prepare rows for insertion
-            rows_to_insert = [
-                (src, idx, txt, emb) for (src, idx, txt), emb in zip(batch_nodes, embeddings)
-            ]
-
-            # Insert batch
-            with conn.cursor() as cur:
-                cur.executemany(
-                    f"INSERT INTO {fqtn} (source_file, chunk_index, text, embedding) VALUES (%s, %s, %s, %s)",
-                    rows_to_insert
-                )
-            conn.commit()
-
-            total_inserted += len(rows_to_insert)
-            if total_inserted % 500 == 0:
-                print(f"[ingest] {total_inserted} nodes inserted so far...")
-
-            # Clear batches
-            batch_nodes.clear()
-            batch_texts.clear()
-
-    # Insert any remaining nodes
-    if batch_nodes:
-        response = client.embeddings.create(model=EMBED_MODEL, input=batch_texts)
-        embeddings = [item.embedding for item in response.data]
-        rows_to_insert = [
-            (src, idx, txt, emb) for (src, idx, txt), emb in zip(batch_nodes, embeddings)
-        ]
-
-        with conn.cursor() as cur:
-            cur.executemany(
-                f"INSERT INTO {fqtn} (source_file, chunk_index, text, embedding) VALUES (%s, %s, %s, %s)",
-                rows_to_insert
-            )
-        conn.commit()
-        total_inserted += len(rows_to_insert)
-
+    # Flush any remaining nodes
+    flush_batch()
     print(f"[ingest] Inserted {total_inserted} nodes into {fqtn}")
 
 
@@ -208,24 +211,13 @@ def main():
         for idx, node_file in enumerate(node_files, start=1):
             nodes = load_nodes(node_file)
 
-            print(
-                f"[ingest] ({idx}/{len(node_files)}) "
-                f"Processing {node_file.relative_to(NODES_DIR)} "
-                f"({len(nodes)} nodes)"
-            )
+            print(f"[ingest] ({idx}/{len(node_files)}) Processing {node_file.relative_to(NODES_DIR)} ({len(nodes)} nodes)")
 
-            insert_nodes(
-                conn=conn,
-                nodes=nodes,
-                client=client,
-                batch_size=EMBED_BATCH_SIZE
-            )
-
+            insert_nodes(conn, nodes, client, batch_size=EMBED_BATCH_SIZE)
             grand_total += len(nodes)
 
         print("-" * 60)
         print(f"[ingest] DONE — total nodes processed: {grand_total}")
-
 
 if __name__ == "__main__":
     main()

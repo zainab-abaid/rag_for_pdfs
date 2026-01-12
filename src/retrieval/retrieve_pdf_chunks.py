@@ -3,7 +3,7 @@
 PDF Retrieval Evaluation with Hybrid Search + QFR + Reranking + Post-filtering
 
 This script evaluates retrieval performance by:
-1. Using hybrid retrieval (vector + optional sparse/BM25 with RRF)
+1. Using hybrid search + Query Fusion Retrieval (QFR) to retrieve top-K chunks from PostgreSQL + pgvector
 2. Applying product post-filtering (none|soft|hard)
 3. Applying reranking (none|entity|rrf|mmr|custom)
 4. Extracting top FINAL_K chunks
@@ -19,6 +19,7 @@ import pandas as pd
 from rapidfuzz import fuzz
 from dotenv import load_dotenv
 from typing import List, Dict, Any
+from collections import defaultdict
 
 # Import the existing retrieval pipeline
 from src.reranking.entity_extraction import extract_entities_spacy
@@ -28,6 +29,9 @@ from src.postfiltering.product_postfilter import apply_postfilter
 from pgvector.psycopg import register_vector
 from llama_index.core.settings import Settings
 from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.core import StorageContext, VectorStoreIndex
+from llama_index.core.retrievers import QueryFusionRetriever
+from llama_index.vector_stores.postgres import PGVectorStore
 import numpy as np
 
 load_dotenv()
@@ -47,11 +51,11 @@ class EvaluationStats:
         if any([self.json_parse_errors, self.retrieval_errors, self.fuzzy_match_errors]):
             print("\n Error Summary:")
             if self.json_parse_errors:
-                print(f"   JSON parsing errors: {self.json_parse_errors}")
+                print(f"JSON parsing errors: {self.json_parse_errors}")
             if self.retrieval_errors:
-                print(f"   Retrieval errors: {self.retrieval_errors}")
+                print(f"Retrieval errors: {self.retrieval_errors}")
             if self.fuzzy_match_errors:
-                print(f"   Fuzzy matching errors: {self.fuzzy_match_errors}")
+                print(f"Fuzzy matching errors: {self.fuzzy_match_errors}")
 
 eval_stats = EvaluationStats()
 
@@ -74,11 +78,12 @@ SPARSE_TOP_K = int(os.environ.get("SPARSE_TOP_K", "30"))
 FINAL_K = int(os.environ.get("FINAL_K", "5"))
 FUZZY_THRESHOLD = int(os.environ.get("FUZZY_THRESHOLD", "70"))
 
-DATASET_QUERIES = os.environ.get("DATASET_QUERIES", "./data/questions_answers/query_dataset_with_qa.csv")
+DATASET_QUERIES = os.environ.get("DATASET_QUERIES", "./data/questions_answers/query_dataset_with_qa_short.csv")
 PDF_RETRIEVAL_LOG_CSV = os.environ.get("PDF_RETRIEVAL_LOG_CSV", "logs/pdf_retrieval_log.csv")
 
 RERANKER_MODE = os.environ.get("RERANKER_MODE", "none")
 TEXT_SEARCH_CONFIG = os.environ.get("TEXT_SEARCH_CONFIG", "english").lower()
+VERBOSE_LOG = os.environ.get("VERBOSE_LOG", "false").lower() == "true"
 
 # ----------------------Helper: Env Var----------------
 def _env_str(name: str, default: str = "") -> str:
@@ -125,7 +130,7 @@ RERANK_CFG = {
     "idf_mode": _env_str("RERANK_IDF_MODE", "log"),
 }
 
-def rerank_with_entity(query: str, chunks: List[Dict[str, Any]], embed_model: Any, orig_scores: List[float]) -> List[int]:
+def rerank_with_entity(query: str, chunks: List[Dict[str, Any]], orig_scores: List[float], embed_model=None) -> List[int]:
     """Entity-based reranking implementation. embed_model is intentionally unused (kept for dispatcher compatibility)."""
     cfg = RERANK_CFG
     try:
@@ -165,11 +170,12 @@ def initialize_embedding_model():
         Settings.embed_model = embed_model
         return embed_model
     except Exception as e:
-        print(f" Failed to initialize embedding model: {e}")
+        print(f"Failed to initialize embedding model: {e}")
         sys.exit(1)
 
-# ----------------------Vector Retrieval-----------
-def vector_retrieve_for_pdf(query: str, embed_model: Any, k: int = RETRIEVE_TOP_K, sparse_k: int = SPARSE_TOP_K) -> List[Dict[str, Any]]:
+# ----------------------Vector Retrieval----------- 
+#not using it
+def vector_retrieve_for_pdf(query: str, embed_model: Any, k: int = RETRIEVE_TOP_K) -> List[Dict[str, Any]]:
     query_embedding_raw = embed_model.get_text_embedding(query)
     # Convert to numpy array for pgvector
     query_embedding = np.array(query_embedding_raw, dtype=np.float32)
@@ -208,45 +214,99 @@ def vector_retrieve_for_pdf(query: str, embed_model: Any, k: int = RETRIEVE_TOP_
         })
     return results
 
+
+def hybrid_retrieve_QFR(query: str, k: int = RETRIEVE_TOP_K, sparse_k: int = SPARSE_TOP_K) -> List[Dict[str, Any]]:
+    vector_store = PGVectorStore.from_params(
+        database=PG_DB,
+        host=PG_HOST,
+        password=PG_PASSWORD,
+        port=PG_PORT,
+        user=PG_USER,
+        table_name=PG_TABLE_PDF,
+        schema_name=PG_SCHEMA,
+        embed_dim=EMBED_DIM,
+        hybrid_search=True,
+        text_search_config=TEXT_SEARCH_CONFIG,
+    )
+    storage_context = StorageContext.from_defaults(vector_store=vector_store)
+    index = VectorStoreIndex.from_vector_store(vector_store, storage_context=storage_context)
+
+    vector_retriever = index.as_retriever(vector_store_query_mode="default", similarity_top_k=k)
+    text_retriever = index.as_retriever(vector_store_query_mode="sparse", similarity_top_k=sparse_k)
+
+    retriever = QueryFusionRetriever(
+        [vector_retriever, text_retriever],
+        similarity_top_k=k,
+        num_queries=1,
+        mode="relative_score",
+        use_async=True
+    )
+
+    nodes_with_scores = retriever.retrieve(query)
+    results = []
+    for node_with_score in nodes_with_scores:
+        node = node_with_score.node
+        score = node_with_score.score or 0.0
+        metadata = getattr(node, "metadata", {})
+        results.append({
+            "chunk_id": getattr(node, "id", f"{metadata.get('source_file','')}_{metadata.get('chunk_index','')}"),  # unique IDs
+            "text": node.text,
+            "source_file": metadata.get("source_file", ""),
+            "chunk_index": metadata.get("chunk_index", ""),
+            "score": float(score),
+            "vector_score": float(score),
+            "text_score": 0.0,
+            "metadata": metadata
+        })
+    return results
+
 # ----------------------Retrieval + Postfilter + Rerank Pipeline----
 def retrieve_and_process_chunks(query: str, embed_model: Any, k: int = RETRIEVE_TOP_K, sparse_k: int = SPARSE_TOP_K,
                                 final_k: int = FINAL_K, postfilter_mode: str = "none", reranker_mode: str = "none") -> List[Dict[str, Any]]:
+    """Retrieve chunks using hybrid search, apply post-filtering and reranking. Returns final_k chunks in dictionary format."""
     try:
-        chunks = vector_retrieve_for_pdf(query, embed_model, k=k, sparse_k=sparse_k)
+        chunks = hybrid_retrieve_QFR(query, k=k, sparse_k=sparse_k)
     except Exception as e:
         eval_stats.retrieval_errors += 1
-        print(f" Retrieval failed: {e}")
+        print(f"⚠ Retrieval failed: {e}")
         return []
 
     if not chunks:
         return []
 
-    orig_scores = [c["score"] for c in chunks]
+    # Extract original scores
+    orig_scores = [c.get("score", 0.0) for c in chunks]
 
+    # Apply post-filtering if enabled
     if postfilter_mode.lower() != "none":
         try:
             chunks, _ = apply_postfilter(chunks, query, mode=postfilter_mode)
             orig_scores = [c.get("score", 0.0) for c in chunks]
         except Exception as e:
-            print(f" Post-filtering failed: {e}, continuing without it")
+            print(f"Post-filtering failed: {e}, continuing without it")
 
+    # Apply reranking if enabled
     reranker_fn = RERANKER_DISPATCH.get(reranker_mode.lower(), RERANKER_DISPATCH["none"])
     try:
         order = reranker_fn(query, chunks, orig_scores, embed_model)
         if not isinstance(order, list) or len(order) != len(chunks):
+            print(f"Invalid reranker output, using original order")
             order = list(range(len(chunks)))
         chunks = [chunks[i] for i in order]
     except Exception as e:
-        print(f" Reranking failed: {e}, using original order")
+        print(f"Reranking failed: {e}, using original order")
 
     return chunks[:final_k]
 
 # ----------------------Chunk → Section Mapping-----------
-def map_chunk_to_sections(chunk_text: str, json_path: str, json_cache: Dict[str, list]) -> List[str]:
+def map_chunk_to_sections(chunk_text: str, json_path: str, json_cache: Dict[str, list], verbose: bool = True) -> List[str]:
+    """Map a chunk to section_node_ids with detailed debug info."""
     if json_path in json_cache:
         data = json_cache[json_path]
     else:
         if not os.path.exists(json_path):
+            if verbose:
+                print(f"JSON path does not exist: {json_path}")
             return []
         try:
             with open(json_path, "r", encoding="utf-8") as f:
@@ -254,144 +314,257 @@ def map_chunk_to_sections(chunk_text: str, json_path: str, json_cache: Dict[str,
             json_cache[json_path] = data
         except Exception as e:
             eval_stats.json_parse_errors += 1
-            print(f" Error reading JSON {json_path}: {e}")
+            if verbose:
+                print(f"Error reading JSON {json_path}: {e}")
             return []
 
     matched_sections = []
-    for chunk_obj in data:
+    for i, chunk_obj in enumerate(data):
         if not isinstance(chunk_obj, dict):
             continue
         chunk_json_text = chunk_obj.get("text", "")
         metadata = chunk_obj.get("metadata", {})
-        section_node_id = metadata.get("section_node_id")
+        section_node_id = metadata.get("section_node_id")  # make sure this key exists in your JSON
         if not chunk_json_text or not section_node_id:
+            if verbose:
+                print(f"Skipping JSON chunk {i}: missing text or section_node_id")
             continue
         try:
-            score = max(fuzz.partial_ratio(chunk_text, chunk_json_text),
-                        fuzz.token_set_ratio(chunk_text, chunk_json_text))
+            score_partial = fuzz.partial_ratio(chunk_text, chunk_json_text)
+            score_token = fuzz.token_set_ratio(chunk_text, chunk_json_text)
+            score_raw = max(score_partial, score_token)
+            
+            # Penalize length mismatch
+            len_ratio = min(len(chunk_text), len(chunk_json_text)) / max(len(chunk_text), len(chunk_json_text))
+            score = score_raw * len_ratio
+
+            if verbose:
+                print(f"  Comparing with JSON chunk {i} | section_id: {section_node_id}")
+                print(f"    partial_ratio: {score_partial}, token_set_ratio: {score_token}, len_ratio: {len_ratio:.2f}, normalized score: {score:.2f}")
+
             if score >= FUZZY_THRESHOLD and section_node_id not in matched_sections:
                 matched_sections.append(section_node_id)
-        except Exception:
+            elif verbose:
+                print(f"Score below threshold ({FUZZY_THRESHOLD})")
+
+        except Exception as e:
             eval_stats.fuzzy_match_errors += 1
+            if verbose:
+                print(f"Fuzzy matching exception: {e}")
             continue
+
+    if verbose:
+        print(f"Chunk mapped to sections: {matched_sections}\n")
     return matched_sections
 
-# ----------------------Evaluation----------------------
+def build_retrieved_context(mapped_chunks_json: str, retrieved_context_json: str, min_text_len: int = 80) -> List[Dict[str, Any]]:
+    """Convert CSV-style retrieval output into a clean retrieved_context suitable for answer generation.
+    
+    Inputs:
+      - mapped_chunks_json     : JSON string from CSV (mapped_chunks column)
+      - retrieved_context_json : JSON string from CSV (retrieved_context column)
+    Returns:
+      List of section-level context blocks with globally unique text.
+    """
+    try:
+        mapped_chunks = json.loads(mapped_chunks_json)
+        retrieved_nodes = json.loads(retrieved_context_json)
+    except Exception:
+        return []
 
+    # 1. Build chunk_index -> section_ids mapping (skip empty chunk_index)
+    chunk_to_sections: Dict[str, List[str]] = {}
+    for entry in mapped_chunks:
+        chunk_index = entry.get("chunk_index")
+        section_str = entry.get("mapped_sections", "")
+        
+        # Skip if chunk_index is None or empty string
+        if not chunk_index or not section_str:
+            continue
+            
+        chunk_to_sections[str(chunk_index)] = [s for s in section_str.split(";") if s]
+
+    # 2. Group retrieved nodes by section_id
+    sections: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
+        "texts": [],
+        "section_path": [],
+        "doc_title": "",
+    })
+
+    seen_texts = set()  # global deduplication across all sections
+
+    for node in retrieved_nodes:
+        chunk_index = node.get("chunk_index")
+        text = (node.get("text") or "").strip()
+
+        # Skip invalid or duplicate text
+        if not text or len(text) < min_text_len or text in seen_texts:
+            continue
+        
+        # Skip if chunk_index is empty
+        if not chunk_index:
+            continue
+            
+        seen_texts.add(text)
+
+        section_ids = chunk_to_sections.get(str(chunk_index), [])
+        if not section_ids:
+            continue
+
+        for sid in section_ids:
+            sections[sid]["texts"].append(text)
+            sections[sid]["section_path"] = node.get("section_path", [])
+            sections[sid]["doc_title"] = node.get("doc_title", "")
+
+    # 3. Stitch texts per section
+    retrieved_context: List[Dict[str, Any]] = []
+    for section_id, data in sections.items():
+        stitched_text = "\n\n".join(data["texts"])
+
+        retrieved_context.append({
+            "section_id": section_id,
+            "section_path": data["section_path"],
+            "doc_title": data["doc_title"],
+            "text": stitched_text,
+        })
+
+    return retrieved_context
+
+def save_results_to_csv(all_rows: list[dict], csv_path: str = PDF_RETRIEVAL_LOG_CSV):
+    """
+    Save retrieval results to CSV, overwriting any existing file.
+    
+    Parameters:
+        all_rows: list of dicts, each dict represents one query result
+    """
+    cleaned_rows = []
+    for row_data in all_rows:
+        mapped_chunks = row_data.get("mapped_chunks") or []
+        retrieved_context = row_data.get("retrieved_context") or []
+
+        cleaned_rows.append({
+            "question": row_data.get("question", ""),
+            "gt_section_id": row_data.get("gt_section_id", ""),
+            "retrieval_success": row_data.get("retrieval_success", 0),
+            "mapped_chunks": json.dumps(mapped_chunks, ensure_ascii=False),
+            "retrieved_context": json.dumps(retrieved_context, ensure_ascii=False),
+            "reranker_mode": row_data.get("reranker_mode", ""),
+            "postfilter_mode": row_data.get("postfilter_mode", "")
+        })
+
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    df = pd.DataFrame(cleaned_rows)
+    df.to_csv(csv_path, index=False, header=True)
+
+
+# ----------------------Evaluation----------------------
 def evaluate_retrieval(embed_model) -> float:
-    """
-    Evaluate retrieval performance based on whether any of the top FINAL_K
-    retrieved chunks map to the GT section ID.
-    """
+    """Evaluate retrieval and save results to CSV with fresh data, including retrieved_context and answer."""
     reranker_mode = _env_str("RERANKER_MODE", "none")
     postfilter_mode = _env_str("POSTFILTER_MODE", "none")
 
     try:
         df_queries = pd.read_csv(DATASET_QUERIES)
     except Exception as e:
-        print(f" Failed to read query dataset: {e}")
+        print(f"Failed to read query dataset: {e}")
         return 0.0
 
-    try:
-        from tqdm import tqdm
-        iterator = tqdm(df_queries.iterrows(), total=len(df_queries), desc="Evaluating")
-    except ImportError:
-        iterator = df_queries.iterrows()
-
-    results_log = []
-    successes = []
+    results_rows = []
     json_cache = {}
+    successes = []
 
-    for idx, row in iterator:
-        query = row["question"]
-        gt_section_id = str(row["gt_section_id"]).strip()
-        source_json = row["source_path"]
+    # Clear CSV if exists
+    if os.path.exists(PDF_RETRIEVAL_LOG_CSV):
+        os.remove(PDF_RETRIEVAL_LOG_CSV)
 
-        if not gt_section_id or not source_json:
-            continue  # skip if missing GT or JSON
+    for idx, row in df_queries.iterrows():
+        query = str(row.get("question", "")).strip()
+        gt_section_id = str(row.get("gt_section_id", "")).strip()
+        source_json = row.get("source_path", "")
+        answer_text = str(row.get("answer", "")).strip()  # from input CSV
+
+        if not query or not source_json:
+            print(f"Skipping row {idx}: missing query or JSON")
+            continue
+
+        print(f"\n=== Query {idx} ===\nQuestion: {query}\nGT Section: {gt_section_id}\nJSON: {source_json}\n")
 
         # Step 1: Retrieve chunks
-        try:
-            retrieved_chunks = retrieve_and_process_chunks(
-                query,
-                embed_model=embed_model,
-                k=RETRIEVE_TOP_K,
-                sparse_k=SPARSE_TOP_K,
-                final_k=FINAL_K,
-                postfilter_mode=postfilter_mode,
-                reranker_mode=reranker_mode
-            )
-        except Exception as e:
-            print(f" Retrieval failed for query {idx}: {e}")
-            retrieved_chunks = []
+        retrieved_chunks = retrieve_and_process_chunks(
+            query,
+            embed_model=embed_model,
+            k=RETRIEVE_TOP_K,
+            sparse_k=SPARSE_TOP_K,
+            final_k=FINAL_K,
+            postfilter_mode=postfilter_mode,
+            reranker_mode=reranker_mode
+        )
 
         # Step 2: Map chunks to JSON sections
-        success = 0
-        mapped_chunks_info = []
+        mapped_chunks_out = []
+        retrieved_context_out = []
 
-        for chunk in retrieved_chunks:
-            chunk_text = chunk.get("text", "")
-            mapped_sections = map_chunk_to_sections(chunk_text, source_json, json_cache)
+        seen_texts = set()
+        retrieval_success = 0
+        for i, chunk in enumerate(retrieved_chunks):
+            chunk_text = chunk.get("text", "").strip()
+            if not chunk_text or chunk_text in seen_texts:
+                continue  # skip duplicate chunk text
 
-            mapped_chunks_info.append({
-                "chunk_id": chunk.get("chunk_id", ""),
-                "mapped_sections": ";".join(mapped_sections),
-                "text_snippet": chunk_text[:100],
-                "source_file": chunk.get("source_file", "")
+            seen_texts.add(chunk_text)  # mark as seen
+
+            chunk_index = chunk.get("metadata", {}).get("chunk_index", "")
+            source_file = chunk.get("source_file", "")
+            doc_title = chunk.get("metadata", {}).get("doc_title", "")
+
+            mapped_sections = map_chunk_to_sections(chunk_text, source_json, json_cache, verbose=False)
+            if gt_section_id and gt_section_id in mapped_sections:
+                retrieval_success = 1
+
+            # Always include in mapped_chunks
+            mapped_chunks_out.append({
+                "chunk_index": chunk_index,
+                "source_file": source_file,
+                "doc_title": doc_title,
+                "mapped_sections": ";".join(mapped_sections)
             })
 
-            # Mark success if GT section is in any mapped sections
-            if gt_section_id in mapped_sections:
-                success = 1
+            # Always include in retrieved_context
+            retrieved_context_out.append({
+                "chunk_id": chunk.get("chunk_id"),
+                "text": chunk_text,
+                "source_file": source_file,
+                "chunk_index": chunk_index,
+                "score": chunk.get("score", 0.0),
+                "vector_score": chunk.get("vector_score", 0.0),
+                "text_score": chunk.get("text_score", 0.0),
+                "metadata": chunk.get("metadata", {})
+            })
 
-        successes.append(success)
+        successes.append(retrieval_success)
 
-        # Step 3: Log results
-        results_log.append({
+        # Append row for CSV
+        results_rows.append({
             "question": query,
+             "answer": answer_text,
             "gt_section_id": gt_section_id,
-            "retrieval_success": success,
-            "mapped_chunks": json.dumps(mapped_chunks_info),
+            "retrieval_success": retrieval_success,
+            "mapped_chunks": json.dumps(mapped_chunks_out, ensure_ascii=False),
+            "retrieved_context": json.dumps(retrieved_context_out, ensure_ascii=False),
             "reranker_mode": reranker_mode,
-            "postfilter_mode": postfilter_mode,
+            "postfilter_mode": postfilter_mode
         })
 
-        print(f"Query: {query[:50]}... | GT Section: {gt_section_id} | Success: {success}")
-        for mc in mapped_chunks_info:
-            print(f"  Chunk {mc['chunk_id']} | Source: {mc['source_file']} | Mapped Sections: {mc['mapped_sections']}")
+        print(f"Retrieval success for this query: {retrieval_success}\n{'-'*60}")
 
-    # Save log
-    if results_log:
-        try:
-            os.makedirs(os.path.dirname(PDF_RETRIEVAL_LOG_CSV), exist_ok=True)
-            pd.DataFrame(results_log).to_csv(PDF_RETRIEVAL_LOG_CSV, index=False)
-            print(f"\n Results saved to: {PDF_RETRIEVAL_LOG_CSV}")
-        except Exception as e:
-            print(f" Failed to save results log: {e}")
-
-    # Step 4: Compute overall success
-    if not successes:
-        print("\n No valid queries evaluated")
-        return 0.0
-
-    overall_score = sum(successes) / len(successes)
-    print(f"\n{'=' * 60}")
-    print(f" SECTION-BASED EVALUATION RESULTS")
-    print(f"{'=' * 60}")
-    print(f"Configuration:")
-    print(f"  Reranker Mode: {reranker_mode}")
-    print(f"  Postfilter Mode: {postfilter_mode}")
-    print(f"  Retrieve Top-K: {RETRIEVE_TOP_K}")
-    print(f"  Final K: {FINAL_K}")
-    print(f"  Fuzzy Threshold: {FUZZY_THRESHOLD}")
-    print(f"\nResults:")
-    print(f"  Total queries evaluated: {len(successes)}")
-    print(f"  Successful retrievals: {sum(successes)}")
-    print(f"  Failed retrievals: {len(successes) - sum(successes)}")
-    print(f"  Overall retrieval score: {overall_score:.4f} ({overall_score * 100:.2f}%)")
-    print(f"{'=' * 60}\n")
-
+    # Write all rows to CSV
+    df_out = pd.DataFrame(results_rows)
+    df_out.to_csv(PDF_RETRIEVAL_LOG_CSV, index=False)
+    overall_score = sum(successes) / len(successes) if successes else 0.0
+    print(f"\nOverall retrieval score: {overall_score:.4f} ({overall_score*100:.2f}%)")
+    eval_stats.report()
     return overall_score
+
 
 
 # ----------------------
