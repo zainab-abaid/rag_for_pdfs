@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""
+LlamaIndex PDF chunk ingestion into PostgreSQL with pgvector for hybrid search.
+
+Each PDF chunk is a Document with metadata:
+- chunk_index
+- source_file
+- doc_title
+
+Columns in Postgres table:
+- text: chunk content
+- metadata: JSONB (chunk_index, source_file, doc_title)
+- embedding: vector (OpenAI embeddings)
+- text_search_tsv: TSVECTOR for text search
+
+Supports dropping and recreating table if needed.
+"""
+
+import os
+import pickle
+from pathlib import Path
+
+import psycopg
+from dotenv import load_dotenv
+from llama_index.core import Document
+from llama_index.vector_stores.postgres import PGVectorStore
+from llama_index.core import VectorStoreIndex, StorageContext
+from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.core.settings import Settings
+
+# ---------------- Env / Configs ----------------
+load_dotenv()
+
+PG_HOST = os.getenv("PG_HOST", "localhost")
+PG_PORT = int(os.getenv("PG_PORT", "5432"))
+PG_DB = os.getenv("PG_DB")
+PG_SCHEMA = os.getenv("PG_SCHEMA", "extreme_pdfs_schema")
+PG_TABLE_PDF = os.getenv("PG_TABLE_PDF", "pdf_chunks")
+PG_USER = os.getenv("PG_USER")
+PG_PASSWORD = os.getenv("PG_PASSWORD", "")
+OVERWRITE_TABLE = os.getenv("OVERWRITE_TABLE", "false").lower() == "true"
+
+EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-3-small")
+EMBED_DIM = int(os.getenv("EMBED_DIM", "1536"))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "100"))
+CHUNKING_STRATEGY = os.getenv("CHUNKING_STRATEGY", "recursive")
+TEXT_SEARCH_CONFIG = os.getenv("TEXT_SEARCH_CONFIG", "english").lower()
+
+NODES_DIR = Path(os.getenv("PDF_PARSED_OUTPUT_DIR", "./data/pdf_node_chunks"))
+
+# ---------------- Utility ----------------
+def load_nodes(node_file: Path):
+    """Load LlamaIndex nodes from .pkl file"""
+    with open(node_file, "rb") as f:
+        return pickle.load(f)
+
+def create_table_if_needed(conn):
+    """Create table for storing PDF chunks and embeddings"""
+    fqtn = f'"{PG_SCHEMA}"."{PG_TABLE_PDF}"'
+    with conn.cursor() as cur:
+        if OVERWRITE_TABLE:
+            print(f"[ingest] Dropping table {fqtn} (OVERWRITE_TABLE=True)...")
+            cur.execute(f"DROP TABLE IF EXISTS {fqtn} CASCADE;")
+
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {fqtn} (
+                id SERIAL PRIMARY KEY,
+                text TEXT NOT NULL,
+                metadata JSONB NOT NULL,
+                embedding vector({EMBED_DIM}) NOT NULL,
+                text_search_tsv tsvector GENERATED ALWAYS AS (to_tsvector('{TEXT_SEARCH_CONFIG}', text)) STORED
+            );
+        """)
+        conn.commit()
+    print(f"[ingest] Table ready: {fqtn}")
+
+# ---------------- Main Ingestion ----------------
+def main():
+    # Connect to Postgres
+    with psycopg.connect(
+        host=PG_HOST,
+        port=PG_PORT,
+        dbname=PG_DB,
+        user=PG_USER,
+        password=PG_PASSWORD
+    ) as conn:
+        create_table_if_needed(conn)
+
+        # Initialize OpenAI embedding model
+        embed_model = OpenAIEmbedding(model=EMBED_MODEL, dimensions=EMBED_DIM)
+        Settings.embed_model = embed_model
+
+        # Discover all node files
+        node_files = sorted((NODES_DIR / CHUNKING_STRATEGY).rglob("*.pkl"))
+        print(f"[ingest] Found {len(node_files)} node files in {NODES_DIR / CHUNKING_STRATEGY}")
+        print(f"[ingest] Embedding model: {EMBED_MODEL}, batch size: {BATCH_SIZE}")
+        print("-"*60)
+
+        # ----------------- Vector Store -----------------
+        vector_store = PGVectorStore.from_params(
+            database=PG_DB,
+            host=PG_HOST,
+            password=PG_PASSWORD,
+            port=PG_PORT,
+            user=PG_USER,
+            table_name=PG_TABLE_PDF,
+            schema_name=PG_SCHEMA,
+            embed_dim=EMBED_DIM,
+            text_search_config=TEXT_SEARCH_CONFIG,
+            hybrid_search=True,  # Enables both vector + text search
+        )
+
+        storage_context = StorageContext.from_defaults(vector_store=vector_store)
+
+        # Process each file individually
+        grand_total = 0
+        for idx, node_file in enumerate(node_files, start=1):
+            nodes = load_nodes(node_file)
+            doc_title = node_file.stem
+            print(f"[ingest] ({idx}/{len(node_files)}) Processing {node_file.relative_to(NODES_DIR)} ({len(nodes)} nodes)")
+
+            # Split nodes into batches
+            for start_idx in range(0, len(nodes), BATCH_SIZE):
+                batch_nodes = nodes[start_idx:start_idx + BATCH_SIZE]
+                documents = [
+                    Document(
+                        text=node.text,
+                        metadata={
+                            "chunk_index": node.metadata.get("chunk_index", 0),
+                            "source_file": node.metadata.get("source_file", "unknown.pdf"),
+                            "doc_title": doc_title
+                        }
+                    )
+                    for node in batch_nodes
+                ]
+                # Insert batch into vector store
+                VectorStoreIndex.from_documents(documents, storage_context=storage_context)
+                print(f"[ingest] ✅ Inserted batch {start_idx+1}-{start_idx+len(batch_nodes)} from {node_file.name}")
+                grand_total += len(documents)
+
+        print("-"*60)
+        print(f"[ingest] ✅ Ingestion complete. Total documents inserted: {grand_total}")
+
+if __name__ == "__main__":
+    main()
