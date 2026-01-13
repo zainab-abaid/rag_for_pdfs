@@ -264,9 +264,8 @@ def load_existing_answers(path: Path, model_filter: str = None) -> Dict[Tuple[st
         print(f"Warning: Could not load answer log: {e}", file=sys.stderr)
     return answers
 
-
 def save_answer_log(path: Path, rows: List[Dict], model: str):
-    fieldnames = ["question", "generated_answer", "context_used", "model"]
+    # Merge new rows with existing ones
     existing = []
     if path.exists():
         try:
@@ -274,16 +273,18 @@ def save_answer_log(path: Path, rows: List[Dict], model: str):
                 existing = list(csv.DictReader(f))
         except Exception:
             existing = []
-    # Merge new rows
-    merged = {(r.get("question", ""), r.get("model", "")): r for r in existing}
+
+    merged = {(r.get("question", ""), model): r for r in existing}
     for r in rows:
         key = (r.get("question", ""), model)
-        merged[key] = {
-            "question": r.get("question", ""),
-            "generated_answer": r.get("generated_answer", ""),
-            "context_used": r.get("context_used", ""),
-            "model": model,
-        }
+        merged[key] = {**r, "model": model}  # Keep all keys in r, plus model
+
+    # Dynamically get fieldnames from merged data
+    all_fieldnames = set()
+    for r in merged.values():
+        all_fieldnames.update(r.keys())
+    fieldnames = list(all_fieldnames)
+
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -293,7 +294,7 @@ def save_answer_log(path: Path, rows: List[Dict], model: str):
 
 def main():
     if not PDF_RETRIEVAL_LOG_CSV or not Path(PDF_RETRIEVAL_LOG_CSV).exists():
-        raise SystemExit("Retrieval log CSV not found")
+        raise SystemExit("PDF Retrieval log CSV not found")
     if not ANSWER_PDF_LOG_CSV:
         raise SystemExit("ANSWER_PDF_LOG_CSV not set")
 
@@ -308,6 +309,7 @@ def main():
         raise SystemExit("Model not set")
 
     is_gemini = is_gemini_model(model)
+    print(f"Answer generation will use OpenAI model: {model}")
 
     # Initialize client
     if use_groq:

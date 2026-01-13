@@ -78,7 +78,7 @@ SPARSE_TOP_K = int(os.environ.get("SPARSE_TOP_K", "30"))
 FINAL_K = int(os.environ.get("FINAL_K", "5"))
 FUZZY_THRESHOLD = int(os.environ.get("FUZZY_THRESHOLD", "70"))
 
-DATASET_QUERIES = os.environ.get("DATASET_QUERIES", "./data/questions_answers/query_dataset_with_qa_short.csv")
+DATASET_QUERIES = os.environ.get("DATASET_QUERIES", "./data/questions_answers/query_dataset_with_qa.csv")
 PDF_RETRIEVAL_LOG_CSV = os.environ.get("PDF_RETRIEVAL_LOG_CSV", "logs/pdf_retrieval_log.csv")
 
 RERANKER_MODE = os.environ.get("RERANKER_MODE", "none")
@@ -172,47 +172,6 @@ def initialize_embedding_model():
     except Exception as e:
         print(f"Failed to initialize embedding model: {e}")
         sys.exit(1)
-
-# ----------------------Vector Retrieval----------- 
-#not using it
-def vector_retrieve_for_pdf(query: str, embed_model: Any, k: int = RETRIEVE_TOP_K) -> List[Dict[str, Any]]:
-    query_embedding_raw = embed_model.get_text_embedding(query)
-    # Convert to numpy array for pgvector
-    query_embedding = np.array(query_embedding_raw, dtype=np.float32)
-    
-    
-    with psycopg.connect(host=PG_HOST, port=PG_PORT, dbname=PG_DB, user=PG_USER, password=PG_PASSWORD) as conn:
-        register_vector(conn)
-        
-        with conn.cursor() as cur:
-            # Vector-only search
-            cur.execute(
-                f"""
-                SELECT id, text, source_file, chunk_index,
-                       1 - (embedding <=> %s::vector) AS similarity,
-                       0.0 AS text_score,
-                       1 - (embedding <=> %s::vector) AS rrf_score
-                FROM {PG_SCHEMA}.{PG_TABLE_PDF}
-                ORDER BY embedding <=> %s::vector
-                LIMIT %s;
-                """,
-                (query_embedding, query_embedding, query_embedding, k)
-            )
-            rows = cur.fetchall()
-    
-    results = []
-    for row in rows:
-        results.append({
-            "chunk_id": row[0],
-            "text": row[1],
-            "source_file": row[2],
-            "chunk_index": row[3],
-            "vector_score": float(row[4]),
-            "text_score": float(row[5]),
-            "score": float(row[6]),
-            "metadata": {"source_file": row[2], "chunk_index": row[3]}
-        })
-    return results
 
 
 def hybrid_retrieve_QFR(query: str, k: int = RETRIEVE_TOP_K, sparse_k: int = SPARSE_TOP_K) -> List[Dict[str, Any]]:
@@ -330,22 +289,13 @@ def map_chunk_to_sections(chunk_text: str, json_path: str, json_cache: Dict[str,
                 print(f"Skipping JSON chunk {i}: missing text or section_node_id")
             continue
         try:
-            score_partial = fuzz.partial_ratio(chunk_text, chunk_json_text)
-            score_token = fuzz.token_set_ratio(chunk_text, chunk_json_text)
-            score_raw = max(score_partial, score_token)
-            
-            # Penalize length mismatch
-            len_ratio = min(len(chunk_text), len(chunk_json_text)) / max(len(chunk_text), len(chunk_json_text))
-            score = score_raw * len_ratio
-
-            if verbose:
-                print(f"  Comparing with JSON chunk {i} | section_id: {section_node_id}")
-                print(f"    partial_ratio: {score_partial}, token_set_ratio: {score_token}, len_ratio: {len_ratio:.2f}, normalized score: {score:.2f}")
+            score = max(
+                fuzz.partial_ratio(chunk_text, chunk_json_text),
+                fuzz.token_set_ratio(chunk_text, chunk_json_text),
+            )
 
             if score >= FUZZY_THRESHOLD and section_node_id not in matched_sections:
                 matched_sections.append(section_node_id)
-            elif verbose:
-                print(f"Score below threshold ({FUZZY_THRESHOLD})")
 
         except Exception as e:
             eval_stats.fuzzy_match_errors += 1
@@ -433,28 +383,35 @@ def build_retrieved_context(mapped_chunks_json: str, retrieved_context_json: str
 def save_results_to_csv(all_rows: list[dict], csv_path: str = PDF_RETRIEVAL_LOG_CSV):
     """
     Save retrieval results to CSV, overwriting any existing file.
-    
-    Parameters:
-        all_rows: list of dicts, each dict represents one query result
+    Ensures that mapped_chunks, retrieved_context, and retrieved_full_pretrim are properly JSON-encoded.
     """
     cleaned_rows = []
+
     for row_data in all_rows:
         mapped_chunks = row_data.get("mapped_chunks") or []
         retrieved_context = row_data.get("retrieved_context") or []
+        retrieved_full_pretrim = row_data.get("retrieved_full_pretrim") or []
 
         cleaned_rows.append({
             "question": row_data.get("question", ""),
+            "answer": row_data.get("answer", ""),
             "gt_section_id": row_data.get("gt_section_id", ""),
             "retrieval_success": row_data.get("retrieval_success", 0),
             "mapped_chunks": json.dumps(mapped_chunks, ensure_ascii=False),
             "retrieved_context": json.dumps(retrieved_context, ensure_ascii=False),
+            "retrieved_full_pretrim": json.dumps(retrieved_full_pretrim, ensure_ascii=False),
             "reranker_mode": row_data.get("reranker_mode", ""),
             "postfilter_mode": row_data.get("postfilter_mode", "")
         })
 
+    # Ensure directory exists
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+
+    # Overwrite CSV with fresh data
     df = pd.DataFrame(cleaned_rows)
     df.to_csv(csv_path, index=False, header=True)
+    print(f"Retrieval results saved to: {csv_path}")
+
 
 
 # ----------------------Evaluation----------------------
@@ -481,7 +438,7 @@ def evaluate_retrieval(embed_model) -> float:
         query = str(row.get("question", "")).strip()
         gt_section_id = str(row.get("gt_section_id", "")).strip()
         source_json = row.get("source_path", "")
-        answer_text = str(row.get("answer", "")).strip()  # from input CSV
+        answer_text = str(row.get("answer", "")).strip()
 
         if not query or not source_json:
             print(f"Skipping row {idx}: missing query or JSON")
@@ -489,8 +446,39 @@ def evaluate_retrieval(embed_model) -> float:
 
         print(f"\n=== Query {idx} ===\nQuestion: {query}\nGT Section: {gt_section_id}\nJSON: {source_json}\n")
 
-        # Step 1: Retrieve chunks
-        retrieved_chunks = retrieve_and_process_chunks(
+        # Step 1: Retrieve raw chunks (pretrim)
+        try:
+            raw_chunks = retrieve_and_process_chunks(
+                query,
+                embed_model=embed_model,
+                k=RETRIEVE_TOP_K,
+                sparse_k=SPARSE_TOP_K,
+                final_k=RETRIEVE_TOP_K,  # get all retrieved for pretrim
+                postfilter_mode="none",
+                reranker_mode="none"
+            )
+        except Exception as e:
+            eval_stats.retrieval_errors += 1
+            print(f"Retrieval failed for query: {e}")
+            raw_chunks = []
+
+        # Save full pretrim chunks
+        retrieved_full_pretrim_out = []
+        for chunk in raw_chunks:
+            chunk_text = chunk.get("text", "").strip()
+            retrieved_full_pretrim_out.append({
+                "chunk_id": chunk.get("chunk_id"),
+                "text": chunk_text,
+                "source_file": chunk.get("source_file", ""),
+                "chunk_index": chunk.get("metadata", {}).get("chunk_index", ""),
+                "score": chunk.get("score", 0.0),
+                "vector_score": chunk.get("vector_score", 0.0),
+                "text_score": chunk.get("text_score", 0.0),
+                "metadata": chunk.get("metadata", {})
+            })
+
+        # Step 2: Process chunks (apply postfiltering, reranking, final_k trimming)
+        processed_chunks = retrieve_and_process_chunks(
             query,
             embed_model=embed_model,
             k=RETRIEVE_TOP_K,
@@ -500,19 +488,18 @@ def evaluate_retrieval(embed_model) -> float:
             reranker_mode=reranker_mode
         )
 
-        # Step 2: Map chunks to JSON sections
+        # Step 3: Map processed chunks to sections and build retrieved_context
         mapped_chunks_out = []
         retrieved_context_out = []
 
         seen_texts = set()
         retrieval_success = 0
-        for i, chunk in enumerate(retrieved_chunks):
+        for chunk in processed_chunks:
             chunk_text = chunk.get("text", "").strip()
             if not chunk_text or chunk_text in seen_texts:
-                continue  # skip duplicate chunk text
+                continue
 
-            seen_texts.add(chunk_text)  # mark as seen
-
+            seen_texts.add(chunk_text)
             chunk_index = chunk.get("metadata", {}).get("chunk_index", "")
             source_file = chunk.get("source_file", "")
             doc_title = chunk.get("metadata", {}).get("doc_title", "")
@@ -521,7 +508,6 @@ def evaluate_retrieval(embed_model) -> float:
             if gt_section_id and gt_section_id in mapped_sections:
                 retrieval_success = 1
 
-            # Always include in mapped_chunks
             mapped_chunks_out.append({
                 "chunk_index": chunk_index,
                 "source_file": source_file,
@@ -529,7 +515,6 @@ def evaluate_retrieval(embed_model) -> float:
                 "mapped_sections": ";".join(mapped_sections)
             })
 
-            # Always include in retrieved_context
             retrieved_context_out.append({
                 "chunk_id": chunk.get("chunk_id"),
                 "text": chunk_text,
@@ -546,11 +531,12 @@ def evaluate_retrieval(embed_model) -> float:
         # Append row for CSV
         results_rows.append({
             "question": query,
-             "answer": answer_text,
+            "answer": answer_text,
             "gt_section_id": gt_section_id,
             "retrieval_success": retrieval_success,
             "mapped_chunks": json.dumps(mapped_chunks_out, ensure_ascii=False),
             "retrieved_context": json.dumps(retrieved_context_out, ensure_ascii=False),
+            "retrieved_full_pretrim": json.dumps(retrieved_full_pretrim_out, ensure_ascii=False),
             "reranker_mode": reranker_mode,
             "postfilter_mode": postfilter_mode
         })
@@ -565,11 +551,6 @@ def evaluate_retrieval(embed_model) -> float:
     eval_stats.report()
     return overall_score
 
-
-
-# ----------------------
-# Main
-# ----------------------
 def main():
     embed_model = initialize_embedding_model()
     evaluate_retrieval(embed_model)
