@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Create HNSW indexes on vector columns for fast similarity search.
+Create HNSW indexes on vector columns for fast similarity search. This script is Optional.
 
 HNSW (Hierarchical Navigable Small World) indexes are much faster than
 sequential scans for vector similarity queries. This script creates

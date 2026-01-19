@@ -3,12 +3,46 @@
 PDF Retrieval Evaluation with Hybrid Search + QFR + Reranking + Post-filtering
 
 This script evaluates retrieval performance by:
-1. Using hybrid search + Query Fusion Retrieval (QFR) to retrieve top-K chunks from PostgreSQL + pgvector
-2. Applying product post-filtering (none|soft|hard)
-3. Applying reranking (none|entity|rrf|mmr|custom) Note: This script only contains entity based reranking implementation.
-4. Extracting top FINAL_K chunks
-5. Fuzzy matching retrieved chunks to JSON section_node_ids
-6. Comparing against ground truth section IDs
+1. Using hybrid search + Query Fusion Retrieval (QFR) to retrieve top-K chunks from PostgreSQL + pgvector.
+2. Applying product post-filtering (none|soft|hard).
+3. Applying reranking (none|entity|rrf|mmr|custom). Note: This script only contains entity-based reranking implementation.
+4. Extracting top FINAL_K chunks.
+5. Fuzzy matching retrieved chunks to JSON section_node_ids.
+6. Comparing against ground truth section IDs to evaluate accuracy.
+
+### Fuzzy Matching and Ground Truth Comparison:
+- **Fuzzy Matching**: Uses the RapidFuzz library to compute similarity scores between retrieved chunks and ground truth section_node_ids. A match is considered valid if the similarity score exceeds the `FUZZY_THRESHOLD`.
+- **Ground Truth Comparison**: Matches the retrieved chunks against the ground truth section IDs provided in DATASET_QUERIES. The logic for determining success is as follows:
+  - If at least one ground truth section ID matches any of the retrieved chunks, the retrieval is considered successful, and the success score for that query is set to 1.
+  - If no matches are found, the success score remains 0.
+
+### Required Environment Variables:
+- **PostgreSQL Settings**:
+  - `PG_HOST`: PostgreSQL host (default: localhost).
+  - `PG_PORT`: PostgreSQL port (default: 5432).
+  - `PG_DB`: Database name.
+  - `PG_SCHEMA`: Schema name.
+  - `PG_USER`: Database user.
+  - `PG_PASSWORD`: Database password.
+  - `PG_TABLE_PDF`: Table name (default: pdf_chunks).
+- **Embedding Model**:
+  - `EMBED_MODEL`: OpenAI embedding model (default: text-embedding-3-small).
+  - `EMBED_DIM`: Dimension of embedding vectors (default: 1536).
+- **Retrieval and Evaluation Settings**:
+  - `RETRIEVE_TOP_K`: Number of top chunks to retrieve (default: 30).
+  - `SPARSE_TOP_K`: Number of sparse chunks to retrieve (default: 30).
+  - `FINAL_K`: Number of final chunks to extract after reranking (default: 5).
+  - `FUZZY_THRESHOLD`: Similarity threshold for fuzzy matching (default: 70).
+  - `DATASET_QUERIES`: Path to the dataset queries file (default: ./data/questions_answers/query_dataset_with_qa.csv).
+  - `CHUNKING_STRATEGY`: Strategy used for chunking (e.g., recursive).
+  - `PDF_RETRIEVAL_LOG_CSV`: Path to the retrieval log file (default: logs/pdf_retrieval_log_<CHUNKING_STRATEGY>.csv).
+  - `RERANKER_MODE`: Reranking mode (none|entity|rrf|mmr|custom, default: none).
+  - `TEXT_SEARCH_CONFIG`: Text search configuration (default: english).
+  - `VERBOSE_LOG`: Enable verbose logging (true/false, default: false).
+
+### Usage Notes:
+- Ensure the PostgreSQL database is set up and populated with chunked data before running this script.
+- Adjust the `FUZZY_THRESHOLD` and `FINAL_K` values based on the desired precision and recall trade-offs.
 """
 from __future__ import annotations
 import os
