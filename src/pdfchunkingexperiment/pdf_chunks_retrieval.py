@@ -5,7 +5,7 @@ PDF Retrieval Evaluation with Hybrid Search + QFR + Reranking + Post-filtering
 This script evaluates retrieval performance by:
 1. Using hybrid search + Query Fusion Retrieval (QFR) to retrieve top-K chunks from PostgreSQL + pgvector
 2. Applying product post-filtering (none|soft|hard)
-3. Applying reranking (none|entity|rrf|mmr|custom)
+3. Applying reranking (none|entity|rrf|mmr|custom) Note: This script only contains entity based reranking implementation.
 4. Extracting top FINAL_K chunks
 5. Fuzzy matching retrieved chunks to JSON section_node_ids
 6. Comparing against ground truth section IDs
@@ -14,7 +14,6 @@ from __future__ import annotations
 import os
 import sys
 import json
-import psycopg
 import pandas as pd
 from rapidfuzz import fuzz
 from dotenv import load_dotenv
@@ -32,7 +31,6 @@ from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.core import StorageContext, VectorStoreIndex
 from llama_index.core.retrievers import QueryFusionRetriever
 from llama_index.vector_stores.postgres import PGVectorStore
-import numpy as np
 
 load_dotenv()
 
@@ -79,8 +77,8 @@ FINAL_K = int(os.environ.get("FINAL_K", "5"))
 FUZZY_THRESHOLD = int(os.environ.get("FUZZY_THRESHOLD", "70"))
 
 DATASET_QUERIES = os.environ.get("DATASET_QUERIES", "./data/questions_answers/query_dataset_with_qa.csv")
-PDF_RETRIEVAL_LOG_CSV = os.environ.get("PDF_RETRIEVAL_LOG_CSV", "logs/pdf_retrieval_log.csv")
-
+CHUNKING_STRATEGY = os.environ.get("CHUNKING_STRATEGY", "recursive")
+PDF_RETRIEVAL_LOG_CSV = os.environ.get("PDF_RETRIEVAL_LOG_CSV", f"logs/pdf_retrieval_log_{CHUNKING_STRATEGY}.csv") #pdf retrieval log file will be appended by chunking strategy
 RERANKER_MODE = os.environ.get("RERANKER_MODE", "none")
 TEXT_SEARCH_CONFIG = os.environ.get("TEXT_SEARCH_CONFIG", "english").lower()
 VERBOSE_LOG = os.environ.get("VERBOSE_LOG", "false").lower() == "true"
@@ -130,7 +128,7 @@ RERANK_CFG = {
     "idf_mode": _env_str("RERANK_IDF_MODE", "log"),
 }
 
-def rerank_with_entity(query: str, chunks: List[Dict[str, Any]], orig_scores: List[float], embed_model=None) -> List[int]:
+def entity_based_reranking(query: str, chunks: List[Dict[str, Any]], orig_scores: List[float], embed_model=None) -> List[int]:
     """Entity-based reranking implementation. embed_model is intentionally unused (kept for dispatcher compatibility)."""
     cfg = RERANK_CFG
     try:
@@ -161,7 +159,8 @@ def rerank_with_entity(query: str, chunks: List[Dict[str, Any]], orig_scores: Li
         print(f"[RERANK][ENTITY] failed: {e}")
         return list(range(len(chunks)))
 
-RERANKER_DISPATCH["entity"] = rerank_with_entity
+
+RERANKER_DISPATCH["entity"] = entity_based_reranking
 
 # ----------------------Embedding Model Initialization-----------
 def initialize_embedding_model():
@@ -380,39 +379,6 @@ def build_retrieved_context(mapped_chunks_json: str, retrieved_context_json: str
 
     return retrieved_context
 
-def save_results_to_csv(all_rows: list[dict], csv_path: str = PDF_RETRIEVAL_LOG_CSV):
-    """
-    Save retrieval results to CSV, overwriting any existing file.
-    Ensures that mapped_chunks, retrieved_context, and retrieved_full_pretrim are properly JSON-encoded.
-    """
-    cleaned_rows = []
-
-    for row_data in all_rows:
-        mapped_chunks = row_data.get("mapped_chunks") or []
-        retrieved_context = row_data.get("retrieved_context") or []
-        retrieved_full_pretrim = row_data.get("retrieved_full_pretrim") or []
-
-        cleaned_rows.append({
-            "question": row_data.get("question", ""),
-            "answer": row_data.get("answer", ""),
-            "gt_section_id": row_data.get("gt_section_id", ""),
-            "retrieval_success": row_data.get("retrieval_success", 0),
-            "mapped_chunks": json.dumps(mapped_chunks, ensure_ascii=False),
-            "retrieved_context": json.dumps(retrieved_context, ensure_ascii=False),
-            "retrieved_full_pretrim": json.dumps(retrieved_full_pretrim, ensure_ascii=False),
-            "reranker_mode": row_data.get("reranker_mode", ""),
-            "postfilter_mode": row_data.get("postfilter_mode", "")
-        })
-
-    # Ensure directory exists
-    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-
-    # Overwrite CSV with fresh data
-    df = pd.DataFrame(cleaned_rows)
-    df.to_csv(csv_path, index=False, header=True)
-    print(f"Retrieval results saved to: {csv_path}")
-
-
 
 # ----------------------Evaluation----------------------
 def evaluate_retrieval(embed_model) -> float:
@@ -545,6 +511,7 @@ def evaluate_retrieval(embed_model) -> float:
 
     # Write all rows to CSV
     df_out = pd.DataFrame(results_rows)
+    os.makedirs(os.path.dirname(PDF_RETRIEVAL_LOG_CSV), exist_ok=True)
     df_out.to_csv(PDF_RETRIEVAL_LOG_CSV, index=False)
     overall_score = sum(successes) / len(successes) if successes else 0.0
     print(f"\nOverall retrieval score: {overall_score:.4f} ({overall_score*100:.2f}%)")
