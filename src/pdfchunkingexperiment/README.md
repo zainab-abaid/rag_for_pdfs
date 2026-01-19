@@ -290,7 +290,7 @@ CSV file with all columns from retrieval log plus: `generated_answer`, `judge_sc
    Create a `data/` folder at the repository root and place your pdf files in `data/eva-docs/` (see Data Setup section above).
 
 5. **Run PDF Chunking Experiment**:
-   Check for `run_pdf_chunking_experiment.py` file inside `pdfchunkingexperiment` folder. Run this file using different commands mentioned in it. It gives option to create database using `create-db` flag. By default it is set to False. Set to True if DB is not created. If any step is failed, it saves the state in a separate state file `pdf_chunking_state.json` and rerun only the skipped files. Check the file's docstring for better understanding.  
+   Check for `run_pdf_chunking_experiment.py` file inside `pdfchunkingexperiment` folder. Run this file using different commands mentioned in it. It gives option to create database using `create-db` flag. By default it is set to False. Set to True if DB is not created. If any step is failed, it saves the state in a separate state file `pdf_chunking_state.json` and which can later be used to rerun only the skipped files. Check the file's docstring for better understanding.  
 
 ## Configuration
 
