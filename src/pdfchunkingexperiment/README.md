@@ -182,7 +182,7 @@ uv run python src/setup/create_hnsw_indexes.py
 3. **Reranking** (optional): Entity-aware reranking
 4. **Trimming**: Returns top `FINAL_K` sections
 5. **Fuzzy Matching**: Matches retrieved chunks to JSON section_node_ids
-6. **Comparing**: Compares against ground truth section ids. Sets success to 1 if any of the retrieved chunks match with ground truth
+6. **Comparing**: Compares against ground truth section ids `./data/questions_answers/query_dataset_with_qa.csv`. Sets success to 1 if any of the retrieved chunks match with ground truth
 
 **Environment Variables**:
 - Database: `PG_HOST`, `PG_PORT`, `PG_DB`, `PG_SCHEMA`, `PG_USER`, `PG_PASSWORD`, `PG_TABLE_PDF`
