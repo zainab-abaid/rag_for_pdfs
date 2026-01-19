@@ -1,34 +1,33 @@
 #!/usr/bin/env python3
 """
-Hybrid retrieval + stitching for section-wise chunks stored in pgvector.
+Hybrid Retrieval and Reranking Script
 
-This version:
-- Assembles an entire section into ONE block string.
-- Keeps breadcrumb/title once per section; strips from subsequent splits.
-- No '-----' inside an assembled section.
-- Final de-dup of assembled sections.
-- Applies FINAL_K postprocessing cap.
-- Logs retrieved_context as a JSON list of assembled sections.
+This script performs hybrid retrieval and reranking for section-wise chunks stored in a PostgreSQL database with pgvector.
+It retrieves relevant sections based on a query, applies post-filtering and reranking strategies, and logs the results for 
+further evaluation.
 
-Env:
-  PG_HOST, PG_PORT, PG_DB, PG_SCHEMA, PG_USER, PG_PASSWORD
-  PG_TABLE
-  TEXT_SEARCH_CONFIG
-  EMBED_MODEL, EMBED_DIM
+Usage:
+    uv run python src/rerankingexperiments/retrieve_with_diff_rerankers.py
 
-  # retrieval knobs
-  RETRIEVE_TOP_K=30        # initial dense top_k for hybrid
-  SPARSE_TOP_K=30          # BM25 candidates for hybrid
-  FINAL_K=5                # final number of assembled sections to return/log per query
+Environment Variables (REQUIRED):
+    PG_HOST, PG_PORT, PG_DB, PG_SCHEMA, PG_USER, PG_PASSWORD: PostgreSQL connection details.
+    PG_TABLE: Name of the table containing section-based chunks.
+    DATASET_QUERIES: Path to the input dataset CSV file (e.g., `data/query_dataset_with_qa.csv`).
+    RETRIEVAL_LOG_CSV: Path to save the retrieval log (e.g., `logs/retrieval_log_TOPK5_none.csv`).
+    RERANKER_MODE: Reranking strategy to use (e.g., `none`, `entity`, `colbert`, `mmr`, `llm`, `flag`).
+    POSTFILTER_MODE: Post-filtering strategy to use (e.g., `none`, `soft`, `hard`).
 
-  # dataset paths
-  DATASET_QUERIES=./data/manual_queries_from_chunks.csv
-  RETRIEVAL_LOG_CSV=logs/retrieval_log.csv  # REQUIRED: where to save retrieval log
-  
-  # REQUIRED: configuration (no defaults - must be set explicitly)
-  RERANKER_MODE=none|entity|colbert|flag|llm|rrf|mmr|custom  # REQUIRED: reranker mode
-  POSTFILTER_MODE=none|soft|hard            # REQUIRED: postfilter mode
+Environment Variables (OPTIONAL):
+    RETRIEVE_TOP_K: Number of top results to retrieve in the initial dense search (default: 30).
+    SPARSE_TOP_K: Number of top results to retrieve in the sparse search (default: 30).
+    FINAL_K: Number of final results to return after reranking and trimming (default: 5).
+    EMBED_MODEL, EMBED_DIM: Embedding model and dimensions for vector search.
+
+Outputs:
+    - Logs the retrieved contexts and metadata to the specified `RETRIEVAL_LOG_CSV` file.
+    - Includes detailed telemetry such as ground truth ranks, post-filtering hits, and reranking results.
 """
+
 from __future__ import annotations
 import importlib
 import os, json, csv, re

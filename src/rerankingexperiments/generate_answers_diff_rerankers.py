@@ -3,28 +3,28 @@
 Answer Generation Script
 
 This script:
-1. Reads the retrieval log CSV (from retrieve_and_stitch.py)
+1. Reads the retrieval log CSV (from `retrieve_with_diff_rerankers.py`)
 2. For each query, generates an answer using the retrieved contexts
 3. Saves generated answers to a log file for later evaluation
 
 Usage:
-    uv run python src/evaluation/generate_answers.py
+    uv run python src/rerankingexperiments/generate_answers_diff_rerankers.py
 
 Environment Variables (REQUIRED):
-    RETRIEVAL_LOG_CSV or retrieval_log_csv: Path to retrieval log CSV (from retrieve_and_stitch.py)
-    ANSWER_LOG_CSV or answer_log_csv: Path to save generated answers (e.g., logs/answer_log.csv)
-    
+    RETRIEVAL_LOG_CSV: Path to the retrieval log CSV (e.g., `logs/retrieval_log_TOPK5_none.csv`)
+    ANSWER_LOG_CSV: Path to save generated answers (e.g., `logs/answers_gemini_query_dataset_with_qa_none.csv`)
+
     Model selection (one of):
-    - If USE_GROQ=true: GROQ_MODEL (e.g., llama-3.3-70b-versatile) and GROQ_API_KEY
-    - If USE_GROQ=false or not set: ANSWER_MODEL (e.g., gpt-4o, gemini-2.5-flash)
-    
+    - If `USE_GROQ=true`: `GROQ_MODEL` (e.g., `llama-3.3-70b-versatile`) and `GROQ_API_KEY`
+    - If `USE_GROQ=false` or not set: `ANSWER_MODEL` (e.g., `gpt-4o`, `gemini-2.5-flash`)
+
     API Key (based on model selection):
-    - GROQ_API_KEY: Required when USE_GROQ=true
-    - OPENAI_API_KEY: Required for OpenAI models (when USE_GROQ=false)
-    - GEMINI_API_KEY: Required for Gemini models (when USE_GROQ=false)
+    - `GROQ_API_KEY`: Required when `USE_GROQ=true`
+    - `OPENAI_API_KEY`: Required for OpenAI models (when `USE_GROQ=false`)
+    - `GEMINI_API_KEY`: Required for Gemini models (when `USE_GROQ=false`)
 
 Environment Variables (OPTIONAL):
-    USE_GROQ: Set to 'true' to use Groq API instead of OpenAI/Gemini (default: false)
+    USE_GROQ: Set to `true` to use Groq API instead of OpenAI/Gemini (default: `false`)
 """
 
 import os

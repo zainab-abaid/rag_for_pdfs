@@ -58,7 +58,7 @@ CONFIGURATION
 All dynamic values are controlled via environment variables:
 
 - PDF_DATA_DIR              : Root directory of input PDFs
-- PDF_PARSED_OUTPUT_DIR     : Root directory for output node files
+- PDF_PARSED_OUTPUT_DIR     : Root directory for output node files. Note: for each chunking strategy, a subdirectory will be created.
 - CHUNK_SIZE                : Chunk size for applicable strategies
 - CHUNK_OVERLAP             : Overlap between adjacent chunks
 - CHUNKING_STRATEGY         : Chunking strategy to use
@@ -133,7 +133,7 @@ def get_node_parser(strategy: str):
             return TokenTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
         case "sentence":
             return SentenceSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
-        case "semantic": # this one will be expensive
+        case "semantic": # this one will be expensive as it uses embedding model
             embed_model = OpenAIEmbedding()
             return SemanticSplitterNodeParser(
                 embed_model=embed_model,

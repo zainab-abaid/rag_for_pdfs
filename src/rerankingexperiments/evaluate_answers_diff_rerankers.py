@@ -3,32 +3,32 @@
 Answer Evaluation Script
 
 This script:
-1. Reads the retrieval log CSV (from retrieve_and_stitch.py)
-2. Loads generated answers from the answer log CSV
-3. Compares generated answers against ground truth using an LLM judge (gpt-4o)
+1. Reads the retrieval log CSV (from `retrieve_with_diff_rerankers.py`)
+2. Loads generated answers from the answer log CSV (from `generate_answers_diff_rerankers.py`)
+3. Compares generated answers against ground truth using an LLM judge (e.g., `gpt-4o` or Groq models)
 4. Outputs a simplified evaluation log with only essential columns:
-   - question
-   - gt_answer (ground truth answer)
-   - llm_answer (generated answer)
-   - retrieved_context (top-K context used)
-   - gt_in_topK (whether ground truth was in top-K)
-   - judge_score (0 or 1)
-   - judge_reasoning
+   - `question`: The query/question being evaluated
+   - `gt_answer`: Ground truth answer
+   - `llm_answer`: Generated answer from the model
+   - `retrieved_context`: Top-K context used for generating the answer
+   - `gt_in_topK`: Whether the ground truth was in the top-K retrieved context
+   - `judge_score`: Evaluation score (0 or 1)
+   - `judge_reasoning`: Explanation for the score
 
 Usage:
-    uv run python src/evaluation/evaluate_answers.py
+    uv run python src/rerankingexperiments/evaluate_answers_diff_rerankers.py
 
 Environment Variables (REQUIRED):
-    RETRIEVAL_LOG_CSV or retrieval_log_csv: Path to retrieval log CSV (from retrieve_and_stitch.py)
-    ANSWER_LOG_CSV or answer_log_csv: Path to answer log CSV (from generate_answers.py)
-    ANSWER_EVAL_OUTPUT_CSV or answer_eval_output_csv: Output path for evaluation results (e.g., logs/answer_eval_log.csv)
-    OPENAI_API_KEY: Required for API calls (when USE_GROQ=false)
-    GROQ_API_KEY: Required for API calls (when USE_GROQ=true)
+    RETRIEVAL_LOG_CSV: Path to the retrieval log CSV (e.g., `logs/retrieval_log_TOPK5_none.csv`)
+    ANSWER_LOG_CSV: Path to the answer log CSV (e.g., `logs/answers_gemini_query_dataset_with_qa_none.csv`)
+    ANSWER_EVAL_OUTPUT_CSV: Output path for evaluation results (e.g., `logs/answers_eval_gemini_query_dataset_with_qa_none.csv`)
+    OPENAI_API_KEY: Required for OpenAI API calls (when `USE_GROQ=false`)
+    GROQ_API_KEY: Required for Groq API calls (when `USE_GROQ=true`)
 
 Environment Variables (OPTIONAL):
-    USE_GROQ: Set to 'true' to use Groq API instead of OpenAI (default: false)
-    JUDGE_MODEL: Model to use for judging when USE_GROQ=false (default: gpt-4o)
-    GROQ_MODEL: Model to use for judging when USE_GROQ=true (required when USE_GROQ=true)
+    USE_GROQ: Set to `true` to use Groq API instead of OpenAI (default: `false`)
+    JUDGE_MODEL: Model to use for judging when `USE_GROQ=false` (default: `gpt-4o`)
+    GROQ_MODEL: Model to use for judging when `USE_GROQ=true` (required when `USE_GROQ=true`)
 """
 
 import os
@@ -92,7 +92,8 @@ def judge_answer(
     model: str = "gpt-4o"
 ) -> Tuple[int, str]:
     """
-    Use an LLM judge to evaluate if the generated answer is accurate.
+    Use an LLM judge to evaluate if the generated answer accurately addresses "
+    a question compared to a ground truth answer.
     Returns (score: 0 or 1, reasoning: str).
     
     The judge is lenient: it marks as accurate (1) unless there's an obvious mistake
