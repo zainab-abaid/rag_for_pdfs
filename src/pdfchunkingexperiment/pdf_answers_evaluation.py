@@ -335,7 +335,7 @@ def main():
             writer.writerow(out_row)
             
             # Progress
-            status = "✓" if judge_score == 1 else "✗"
+            status = "[OK]" if judge_score == 1 else "[FAIL]"
             # Show error details if score is 0 and there's an error in reasoning
             error_indicator = ""
             if judge_score == 0 and "error" in judge_reasoning.lower():

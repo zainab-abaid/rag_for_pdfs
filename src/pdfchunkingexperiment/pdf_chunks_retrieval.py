@@ -112,7 +112,9 @@ FUZZY_THRESHOLD = int(os.environ.get("FUZZY_THRESHOLD", "70"))
 
 DATASET_QUERIES = os.environ.get("DATASET_QUERIES", "./data/questions_answers/query_dataset_with_qa.csv")
 CHUNKING_STRATEGY = os.environ.get("CHUNKING_STRATEGY", "recursive")
-PDF_RETRIEVAL_LOG_CSV = os.environ.get("PDF_RETRIEVAL_LOG_CSV", f"logs/pdf_retrieval_log_{CHUNKING_STRATEGY}.csv") #pdf retrieval log file will be appended by chunking strategy
+base_log = os.environ.get("PDF_RETRIEVAL_LOG_CSV", "logs/pdf_retrieval_log.csv")
+stem, ext = os.path.splitext(base_log)
+PDF_RETRIEVAL_LOG_CSV = f"{stem}_{CHUNKING_STRATEGY}{ext}"
 RERANKER_MODE = os.environ.get("RERANKER_MODE", "none")
 TEXT_SEARCH_CONFIG = os.environ.get("TEXT_SEARCH_CONFIG", "english").lower()
 VERBOSE_LOG = os.environ.get("VERBOSE_LOG", "false").lower() == "true"

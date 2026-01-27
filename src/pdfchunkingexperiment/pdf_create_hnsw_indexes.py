@@ -182,7 +182,7 @@ def create_hnsw_index(conn, schema: str, table: str, column: str, distance_op: s
     index_name = f"{table}_{column}_hnsw_idx"
     
     if index_exists(conn, schema, table, index_name):
-        print(f"  ✓ Index '{index_name}' already exists, skipping...")
+        print(f"  [OK] Index '{index_name}' already exists, skipping...")
         return False
     
     print(f"  Creating HNSW index '{index_name}' on {column}...")
@@ -200,11 +200,11 @@ def create_hnsw_index(conn, schema: str, table: str, column: str, distance_op: s
         try:
             cur.execute(sql)
             conn.commit()
-            print(f"  ✓ Index '{index_name}' created successfully")
+            print(f"  [OK] Index '{index_name}' created successfully")
             return True
         except psycopg.Error as e:
             conn.rollback()
-            print(f"  ✗ Failed to create index: {e}")
+            print(f"  [ERROR] Failed to create index: {e}")
             return False
 
 
@@ -245,21 +245,21 @@ def main():
             # Find the actual table
             actual_table = check_data_table(conn, PG_SCHEMA, PG_TABLE_PDF)
             if not actual_table:
-                print(f"✗ Table '{PG_SCHEMA}.{PG_TABLE_PDF}' or '{PG_SCHEMA}.data_{PG_TABLE_PDF}' not found!")
+                print(f"[ERROR] Table '{PG_SCHEMA}.{PG_TABLE_PDF}' or '{PG_SCHEMA}.data_{PG_TABLE_PDF}' not found!")
                 print("\nMake sure you've run ingestion first:")
-                print("  python src/ingestion/ingest_section_chunks.py")
+                print("  python src/pdfchunkingexperiment/pdf_chunks_ingestion.py")
                 sys.exit(1)
             
-            print(f"✓ Found table: {PG_SCHEMA}.{actual_table}")
+            print(f"[OK] Found table: {PG_SCHEMA}.{actual_table}")
             print()
 
             # Get vector columns
             vector_cols = get_vector_columns(conn, PG_SCHEMA, actual_table)
             if not vector_cols:
-                print("✗ No vector columns found in table!")
+                print("[ERROR] No vector columns found in table!")
                 sys.exit(1)
             
-            print(f"✓ Found {len(vector_cols)} vector column(s): {', '.join(vector_cols)}")
+            print(f"[OK] Found {len(vector_cols)} vector column(s): {', '.join(vector_cols)}")
             print()
 
             if args.check:
@@ -270,7 +270,7 @@ def main():
                 all_exist = True
                 for col in vector_cols:
                     exists = index_status[col]
-                    status = "✓ EXISTS" if exists else "✗ MISSING"
+                    status = "[OK] EXISTS" if exists else "[FAIL] MISSING"
                     print(f"  {col}: {status}")
                     if not exists:
                         all_exist = False
@@ -286,19 +286,19 @@ def main():
                             break
                     
                     if index_used:
-                        print("  ✓ HNSW index is being used for vector queries")
+                        print("  [OK] HNSW index is being used for vector queries")
                     else:
-                        print("  ⚠ HNSW index exists but may not be used (this can happen with small tables)")
+                        print("  [WARNING] HNSW index exists but may not be used (this can happen with small tables)")
                     print()
 
                 print("=" * 70)
                 if all_exist:
-                    print("✓ All HNSW indexes exist! Vector search should be fast.")
+                    print("[OK] All HNSW indexes exist! Vector search should be fast.")
                 else:
-                    print("⚠ Some HNSW indexes are missing. This will slow down vector searches.")
+                    print("[WARNING] Some HNSW indexes are missing. This will slow down vector searches.")
                     print()
                     print("To create missing indexes, run:")
-                    print("  python src/setup/create_hnsw_indexes.py")
+                    print("  python src/pdfchunkingexperiment/pdf_create_hnsw_indexes.py")
                 print("=" * 70)
             else:
                 # Create mode
@@ -315,15 +315,15 @@ def main():
 
                 print("=" * 70)
                 if created > 0:
-                    print(f"✓ Successfully created {created} HNSW index(es)")
+                    print(f"[OK] Successfully created {created} HNSW index(es)")
                     print("  Vector similarity search should now be much faster!")
                 else:
-                    print("✓ All HNSW indexes already exist (nothing to create)")
+                    print("[OK] All HNSW indexes already exist (nothing to create)")
                     print("  Vector search should be fast!")
                 print("=" * 70)
                 print()
                 print("To verify indexes, run:")
-                print("  python src/setup/create_hnsw_indexes.py --check")
+                print("  python src/pdfchunkingexperiment/pdf_create_hnsw_indexes.py --check")
 
     except psycopg.Error as e:
         print(f"ERROR: Database operation failed: {e}")

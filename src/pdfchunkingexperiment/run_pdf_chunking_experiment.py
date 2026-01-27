@@ -51,7 +51,7 @@ from datetime import datetime
 # Paths
 # -------------------------------------------------
 THIS_FILE = Path(__file__).resolve()
-PROJECT_ROOT = THIS_FILE.parents[1]   # src → project_root
+PROJECT_ROOT = THIS_FILE.parents[2]   # src → project_root
 SRC_DIR = PROJECT_ROOT / "src"
 PDFCHUNK_DIR = SRC_DIR / "pdfchunkingexperiment"
 
@@ -79,8 +79,8 @@ PIPELINE = [
     ("PDF chunks ingestion",
      PDFCHUNK_DIR / "pdf_chunks_ingestion.py"),
 
-    ("Create HNSW indexes (table name changed)",
-     SRC_DIR / "create_hnsw_indexes.py"),
+    ("Create HNSW indexes",
+     PDFCHUNK_DIR / "pdf_create_hnsw_indexes.py"),
 
     ("PDF chunks retrieval",
      PDFCHUNK_DIR / "pdf_chunks_retrieval.py"),
@@ -156,8 +156,6 @@ def run_pipeline(resume=True, reset=False, create_db=False):
             log.write(f"Resuming - Previously completed: {state['completed_steps']}\n")
         log.write("=" * 100 + "\n\n")
 
-        parser.add_argument("--create-db", action="store_true",
-                    help="Run the database creation step")
         for idx, (step_name, script_path) in enumerate(PIPELINE, 1):
             # Skip database creation by default
             if "create database" in step_name.lower() and not create_db:
@@ -212,7 +210,7 @@ def run_pipeline(resume=True, reset=False, create_db=False):
             mark_step_completed(step_name, state)
             log.write(f"\n[SUCCESS] {step_name}\n")
             log.write("-" * 100 + "\n\n")
-            print(f"  ✓ Completed\n")
+            print(f"  [OK] Completed\n")
 
         log.write("\nALL STEPS COMPLETED SUCCESSFULLY\n")
         log.write(f"Finished at: {datetime.now()}\n")
@@ -224,15 +222,36 @@ def run_pipeline(resume=True, reset=False, create_db=False):
     print(f"{'='*80}\n")
 
 
-# -------------------------------------------------
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Run PDF chunking strategies pipeline")
-    parser.add_argument("--reset", action="store_true",
-                        help="Reset state and run all steps from beginning")
-    parser.add_argument("--no-resume", action="store_true",
-                        help="Don't resume from previous state (but don't clear it)")
+    parser = argparse.ArgumentParser(
+        description="Run PDF chunking strategies pipeline"
+    )
+
+    parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="Reset state and run all steps from beginning"
+    )
+
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Don't resume from previous state (but don't clear it)"
+    )
+
+    parser.add_argument(
+        "--create-db",
+        action="store_true",
+        help="Run the database creation step"
+    )
 
     args = parser.parse_args()
-    run_pipeline(resume=not args.no_resume, reset=args.reset, create_db=args.create_db)
+
+    run_pipeline(
+        resume=not args.no_resume,
+        reset=args.reset,
+        create_db=args.create_db
+    )
+

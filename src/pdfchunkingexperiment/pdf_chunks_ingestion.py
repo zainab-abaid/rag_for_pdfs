@@ -158,11 +158,11 @@ def main():
                 ]
                 # Insert batch into vector store
                 VectorStoreIndex.from_documents(documents, storage_context=storage_context)
-                print(f"[ingest] ✅ Inserted batch {start_idx+1}-{start_idx+len(batch_nodes)} from {node_file.name}")
+                print(f"[ingest] [OK] Inserted batch {start_idx+1}-{start_idx+len(batch_nodes)} from {node_file.name}")
                 grand_total += len(documents)
 
         print("-"*60)
-        print(f"[ingest] ✅ Ingestion complete. Total documents inserted: {grand_total}")
+        print(f"[ingest] [OK] Ingestion complete. Total documents inserted: {grand_total}")
 
 if __name__ == "__main__":
     main()
