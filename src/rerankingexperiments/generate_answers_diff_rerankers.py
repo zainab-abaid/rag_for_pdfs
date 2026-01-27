@@ -476,7 +476,7 @@ def main():
             
             if not generated_answer:
                 failed_generation += 1
-                print(f"[{i}/{total}] ✗ Failed to generate answer | {question[:60]}...")
+                print(f"[{i}/{total}] Failed to generate answer | {question[:60]}...")
                 # Still save the question with empty answer so we know it was attempted
                 new_answers.append({
                     "question": question,
@@ -484,7 +484,7 @@ def main():
                     "context_used": retrieved_context_json[:200] + "..." if len(retrieved_context_json) > 200 else retrieved_context_json
                 })
             else:
-                print(f"[{i}/{total}] ✓ Generated answer | {question[:60]}...")
+                print(f"[{i}/{total}] Generated answer | {question[:60]}...")
                 # Save for answer log
                 new_answers.append({
                     "question": question,

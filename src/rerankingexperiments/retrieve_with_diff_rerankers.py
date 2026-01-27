@@ -573,26 +573,26 @@ def debug_gt_tracking(query, gt_section_id, candidates, postfilter_candidates=No
     candidate_ids = [c['section_id'] for c in candidates]
     print(f"Hybrid/QFR candidates ({len(candidate_ids)}): {candidate_ids[:10]}{'...' if len(candidate_ids) > 10 else ''}")
     if gt_section_id in candidate_ids:
-        print(f"✅ GT found in hybrid/QFR candidates at index {candidate_ids.index(gt_section_id)}")
+        print(f"[OK] GT found in hybrid/QFR candidates at index {candidate_ids.index(gt_section_id)}")
     else:
-        print(f"❌ GT NOT found in hybrid/QFR candidates")
+        print(f"[ERROR] GT NOT found in hybrid/QFR candidates")
 
     # Stage 2: post-filter / trimming
     if postfilter_candidates is not None:
         pf_ids = [c['section_id'] for c in postfilter_candidates]
         print(f"Post-filter candidates ({len(pf_ids)}): {pf_ids[:10]}{'...' if len(pf_ids) > 10 else ''}")
         if gt_section_id in pf_ids:
-            print(f"✅ GT found after post-filter at index {pf_ids.index(gt_section_id)}")
+            print(f"[OK] GT found after post-filter at index {pf_ids.index(gt_section_id)}")
         else:
-            print(f"❌ GT NOT found after post-filter")
+            print(f"[ERROR] GT NOT found after post-filter")
 
     # Stage 3: after rerank
     if rerank_order is not None:
         reranked_ids = [candidates[i]['section_id'] for i in rerank_order]
         if gt_section_id in reranked_ids:
-            print(f"✅ GT found after rerank at index {reranked_ids.index(gt_section_id)}")
+            print(f"[OK] GT found after rerank at index {reranked_ids.index(gt_section_id)}")
         else:
-            print(f"❌ GT NOT found after rerank")
+            print(f"[ERROR] GT NOT found after rerank")
 
 
 

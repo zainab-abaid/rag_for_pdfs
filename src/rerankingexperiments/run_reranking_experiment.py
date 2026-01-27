@@ -107,7 +107,7 @@ def reset_state():
     """Clear all pipeline state (force re-run from beginning)."""
     if STATE_FILE.exists():
         STATE_FILE.unlink()
-    print("✓ Pipeline state reset")
+    print("[OK] Pipeline state reset")
 
 def is_step_completed(step_name, state):
     """Check if a step was previously completed."""
@@ -124,7 +124,7 @@ def mark_step_completed(step_name, state):
 # -------------------------------------------------
 # Runner
 # -------------------------------------------------
-def run_pipeline(resume=True, reset=False):
+def run_pipeline(resume=True, reset=False, create_db=False):
     """
     Run the pipeline.
     
@@ -168,7 +168,12 @@ def run_pipeline(resume=True, reset=False):
         for idx, (step_name, script_path) in enumerate(PIPELINE, 1):
             if resume and is_step_completed(step_name, state):
                 print(f"⏭  [{idx}/{len(PIPELINE)}] Skipping (already completed): {step_name}")
-                log.write(f"[STEP {idx}/{len(PIPELINE)}] SKIPPED (already completed): {step_name}\n")
+                log.write(f"[STEP {idx}/{len(PIPELINE)}] SKIPPED (completed): {step_name}\n")
+                log.write("-" * 100 + "\n\n")
+                continue
+            if step_name == "Create database" and not create_db:
+                print(f"⏭  [{idx}/{len(PIPELINE)}] Skipping (optional): {step_name}")
+                log.write(f"[STEP {idx}/{len(PIPELINE)}] SKIPPED (optional): {step_name}\n")
                 log.write("-" * 100 + "\n\n")
                 continue
 
@@ -221,7 +226,7 @@ def run_pipeline(resume=True, reset=False):
 
             log.write(f"\n[SUCCESS] {step_name}\n")
             log.write("-" * 100 + "\n\n")
-            print(f"  ✓ Completed\n")
+            print(f"  [OK] Completed\n")
 
         log.write("\nALL STEPS COMPLETED SUCCESSFULLY\n")
         log.write(f"Finished at: {datetime.now()}\n")
@@ -242,7 +247,10 @@ if __name__ == "__main__":
                         help="Reset state and run all steps from beginning")
     parser.add_argument("--no-resume", action="store_true",
                         help="Don't resume from previous state (but don't clear it)")
+    parser.add_argument("--create-db", action="store_true", 
+                        help="Run database creation step (optional)"
+)
 
     args = parser.parse_args()
 
-    run_pipeline(resume=not args.no_resume, reset=args.reset)
+    run_pipeline(resume=not args.no_resume, reset=args.reset, create_db=args.create_db)

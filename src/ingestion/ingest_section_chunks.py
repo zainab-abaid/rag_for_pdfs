@@ -102,7 +102,7 @@ def _drop_table_if_requested():
     if not OVERWRITE_TABLE:
         return
     fqtn = f'"{PG_SCHEMA}"."data_{PG_TABLE}"'
-    print(f"[ingest] OVERWRITE_TABLE=true → dropping {fqtn} if it exists...")
+    print(f"[ingest] OVERWRITE_TABLE=true, dropping {fqtn} if it exists...")
     try:
         with psycopg.connect(
             host=PG_HOST, port=PG_PORT, dbname=PG_DB, user=PG_USER, password=PG_PASSWORD
