@@ -279,7 +279,7 @@ def main():
     def pct(n):
         return 0.0 if total == 0 else round(100.0 * n / total, 2)
 
-    print("\n=== Retrieval Evaluation ===")
+    print("\n=== Retrieval Evaluation Summary ===")
     print(f"Dataset file        : {dataset_path}")
     print(f"Reranker mode        : {reranker_mode}")
     print(f"Retrieval log file  : {log_path}")

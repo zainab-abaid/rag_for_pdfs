@@ -58,8 +58,8 @@ except ImportError:
 
 ANSWER_MODEL = os.environ.get("ANSWER_MODEL", "default_model")
 CHUNKING_STRATEGY = os.environ.get("CHUNKING_STRATEGY", "recursive")
-PDF_RETRIEVAL_LOG_CSV = os.environ.get("PDF_RETRIEVAL_LOG_CSV", f"logs/pdf_retrieval_log_{CHUNKING_STRATEGY}.csv")
-
+base_csv = os.environ.get("PDF_RETRIEVAL_LOG_CSV", "logs/pdf_retrieval_log.csv")
+PDF_RETRIEVAL_LOG_CSV = base_csv.replace(".csv", f"_{CHUNKING_STRATEGY}.csv")
 
 def get_openai_client() -> OpenAI:
     """Get OpenAI client from environment."""

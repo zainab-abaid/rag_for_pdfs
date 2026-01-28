@@ -81,11 +81,11 @@ PIPELINE = [
     ("Retrieval evaluation (diff rerankers)",
      SRC_DIR / "rerankingexperiments" / "retrieval_evaluation_diff_rerankers.py"),
 
-    ("Generate answers (diff rerankers)",
-     SRC_DIR / "rerankingexperiments" / "generate_answers_diff_rerankers.py"),
+    #("Generate answers (diff rerankers)",
+    # SRC_DIR / "rerankingexperiments" / "generate_answers_diff_rerankers.py"),
 
-    ("Evaluate answers (diff rerankers)",
-     SRC_DIR / "rerankingexperiments" / "evaluate_answers_diff_rerankers.py"),
+    #("Evaluate answers (diff rerankers)",
+    # SRC_DIR / "rerankingexperiments" / "evaluate_answers_diff_rerankers.py"),
 ]
 
 # -------------------------------------------------

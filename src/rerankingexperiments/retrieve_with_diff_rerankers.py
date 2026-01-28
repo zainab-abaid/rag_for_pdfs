@@ -69,8 +69,6 @@ SPARSE_TOP_K   = int(os.environ.get("SPARSE_TOP_K",   "30"))
 FINAL_K = int(os.environ.get("FINAL_K", "5"))
 
 DATASET_QUERIES = os.environ.get("dataset_queries", "./data/manual_queries_from_chunks.csv")
-# Default output to logs/ directory with sensible naming
-RETRIEVAL_LOG_CSV = os.environ.get("RETRIEVAL_LOG_CSV") or os.environ.get("retrieval_log_csv") or None  # Will be set in demo() based on dataset name
 
 # Optional: set embed model if not configured globally elsewhere
 try:
@@ -196,6 +194,21 @@ def _rerank_mmr(query: str, items: List[Dict[str, Any]], orig_scores: List[float
         return _rerank_via_custom(query, items, orig_scores)
     return list(range(len(items)))
 
+def _rerank_cohere_wrapper(query: str, items: List[Dict[str, Any]], orig_scores: List[float]) -> List[int]:
+    """
+    Wrapper for Cohere reranker.
+    Limits top_n to a reasonable number to reduce cost and latency.
+    """
+    try:
+        from src.reranking.cohere_reranking import rerank_cohere
+    except ImportError:
+        print("WARNING: Cohere reranker not installed.")
+        return list(range(len(items)))
+
+    # Limit top_n: at most 2x FINAL_K or all items if fewer
+    top_n = min(FINAL_K * 2, len(items))
+    return rerank_cohere(query, items, top_n=top_n)
+
 # Dispatcher
 def _get_reranker() -> Callable[[str, List[Dict[str, Any]], List[float]], List[int]]:
     """
@@ -229,6 +242,9 @@ def _get_reranker() -> Callable[[str, List[Dict[str, Any]], List[float]], List[i
     if mode in ("llm", "gpt", "llm_rerank"):
         from src.reranking.llm_reranking import rerank_llm
         return rerank_llm
+    
+    if mode in ("cohere", "cohererank"):
+        return _rerank_cohere_wrapper
     
     if mode == "rrf":
         return _rerank_rrf

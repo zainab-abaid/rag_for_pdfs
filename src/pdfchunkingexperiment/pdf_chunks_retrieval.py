@@ -115,6 +115,9 @@ CHUNKING_STRATEGY = os.environ.get("CHUNKING_STRATEGY", "recursive")
 base_log = os.environ.get("PDF_RETRIEVAL_LOG_CSV", "logs/pdf_retrieval_log.csv")
 stem, ext = os.path.splitext(base_log)
 PDF_RETRIEVAL_LOG_CSV = f"{stem}_{CHUNKING_STRATEGY}{ext}"
+base_eval_log = os.environ.get("PDF_RETRIEVAL_EVAL_LOG_CSV", "logs/pdf_retrieval_eval_log.csv")
+stem_eval, ext_eval = os.path.splitext(base_eval_log)
+PDF_RETRIEVAL_EVAL_LOG_CSV = f"{stem_eval}_{CHUNKING_STRATEGY}{ext_eval}"
 RERANKER_MODE = os.environ.get("RERANKER_MODE", "none")
 TEXT_SEARCH_CONFIG = os.environ.get("TEXT_SEARCH_CONFIG", "english").lower()
 VERBOSE_LOG = os.environ.get("VERBOSE_LOG", "false").lower() == "true"
@@ -429,12 +432,16 @@ def evaluate_retrieval(embed_model) -> float:
         return 0.0
 
     results_rows = []
+    eval_rows = []
     json_cache = {}
     successes = []
 
     # Clear CSV if exists
     if os.path.exists(PDF_RETRIEVAL_LOG_CSV):
         os.remove(PDF_RETRIEVAL_LOG_CSV)
+
+    if os.path.exists(PDF_RETRIEVAL_EVAL_LOG_CSV):
+        os.remove(PDF_RETRIEVAL_EVAL_LOG_CSV)
 
     for idx, row in df_queries.iterrows():
         query = str(row.get("question", "")).strip()
@@ -529,6 +536,22 @@ def evaluate_retrieval(embed_model) -> float:
             })
 
         successes.append(retrieval_success)
+        context_text = "\n\n".join(
+            c.get("text", "").strip()
+            for c in retrieved_context_out
+            if c.get("text")
+        )
+
+        eval_rows.append({
+            "reranker_mode": reranker_mode,
+            "postfilter_mode": postfilter_mode,
+            "question": query,
+            "answer": answer_text,
+            "context": context_text,
+            "source_path": source_json,
+            "gt_section_id": gt_section_id,
+            "retrieval_success": retrieval_success
+        })
 
         # Append row for CSV
         results_rows.append({
@@ -549,10 +572,40 @@ def evaluate_retrieval(embed_model) -> float:
     df_out = pd.DataFrame(results_rows)
     os.makedirs(os.path.dirname(PDF_RETRIEVAL_LOG_CSV), exist_ok=True)
     df_out.to_csv(PDF_RETRIEVAL_LOG_CSV, index=False)
-    overall_score = sum(successes) / len(successes) if successes else 0.0
-    print(f"\nOverall retrieval score: {overall_score:.4f} ({overall_score*100:.2f}%)")
+
+    # -------- Eval CSV with requested columns --------
+    df_eval = pd.DataFrame(eval_rows)
+    os.makedirs(os.path.dirname(PDF_RETRIEVAL_EVAL_LOG_CSV), exist_ok=True)
+    df_eval.to_csv(PDF_RETRIEVAL_EVAL_LOG_CSV, index=False)
+
+    # -------- Summary (append to SAME eval file) --------
+    total = len(successes)
+    success = sum(successes)
+    failure = total - success
+    overall_score = success / total if total else 0.0
+    percentage = overall_score * 100
+
+    summary_rows = [
+        {},
+        {"summary": "SUMMARY"},
+        {"summary": f"Overall score: {overall_score:.4f}"},
+        {"summary": f"Percentage: {percentage:.2f}%"},
+        {"summary": f"1's success: {success}"},
+        {"summary": f"0's failures: {failure}"},
+        {"summary": f"Total rows: {total}"},
+    ]
+
+    pd.DataFrame(summary_rows).to_csv(
+        PDF_RETRIEVAL_EVAL_LOG_CSV,
+        mode="a",
+        header=False,
+        index=False
+    )
+
+    print(f"\nOverall retrieval score: {overall_score:.4f} ({percentage:.2f}%)")
     eval_stats.report()
     return overall_score
+
 
 def main():
     embed_model = initialize_embedding_model()

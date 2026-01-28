@@ -59,7 +59,8 @@ except ImportError:
 CHUNKING_STRATEGY = os.environ.get("CHUNKING_STRATEGY", "recursive")
 ANSWER_MODEL= os.environ.get("ANSWER_MODEL", "gpt-4o")
 ANSWER_MAX_TOKENS = int(os.environ.get("ANSWER_MAX_TOKENS", "500"))
-PDF_RETRIEVAL_LOG_CSV = os.environ.get("PDF_RETRIEVAL_LOG_CSV", f"logs/pdf_retrieval_log_{CHUNKING_STRATEGY}.csv")
+base_csv = os.environ.get("PDF_RETRIEVAL_LOG_CSV", "logs/pdf_retrieval_log.csv")
+PDF_RETRIEVAL_LOG_CSV = base_csv.replace(".csv", f"_{CHUNKING_STRATEGY}.csv")
 
 def is_gemini_model(model: str) -> bool:
     return bool(model and model.lower().startswith("gemini-"))
