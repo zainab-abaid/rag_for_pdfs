@@ -77,3 +77,4 @@ gemini_filesearch_retrieval_evaluation.py
 
 pipeline_state/pdf_chunking_state.json
 
+models/

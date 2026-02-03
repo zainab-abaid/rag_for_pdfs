@@ -5,7 +5,13 @@ PDF Retrieval Evaluation with Hybrid Search + QFR + Reranking + Post-filtering
 This script evaluates retrieval performance by:
 1. Using hybrid search + Query Fusion Retrieval (QFR) to retrieve top-K chunks from PostgreSQL + pgvector.
 2. Applying product post-filtering (none|soft|hard).
-3. Applying reranking (none|entity|rrf|mmr|custom). Note: This script only contains entity-based reranking implementation.
+3. Supported reranking modes are resolved via `_get_reranker()` and may include:
+    - none (identity / baseline)
+    - entity-based
+    - embedding-based (e.g., ColBERT, FlagEmbedding)
+    - LLM-based
+    - Cohere API
+    - custom user-defined rerankers
 4. Extracting top FINAL_K chunks.
 5. Fuzzy matching retrieved chunks to JSON section_node_ids.
 6. Comparing against ground truth section IDs to evaluate accuracy.
@@ -51,8 +57,9 @@ import json
 import pandas as pd
 from rapidfuzz import fuzz
 from dotenv import load_dotenv
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Callable
 from collections import defaultdict
+import importlib
 
 # Import the existing retrieval pipeline
 from src.reranking.entity_extraction import extract_entities_spacy
@@ -143,15 +150,9 @@ def _env_int(name: str, default: int) -> int:
         return int(s) if s != "" else default
     except Exception:
         return default
-
-# ----------------------Reranker Dispatch------------
-RERANKER_DISPATCH = {
-    "none": lambda query, chunks, scores, embed_model: list(range(len(chunks))),
-    "entity": None,  # Will be set to actual function
-    "rrf": lambda query, chunks, scores, embed_model: list(range(len(chunks))),
-    "mmr": lambda query, chunks, scores, embed_model: list(range(len(chunks))),
-    "custom": lambda query, chunks, scores, embed_model: list(range(len(chunks))),
-}
+    
+def _rerank_none(query: str, items: List[Dict[str, Any]], orig_scores: List[float], embed_model=None) -> List[int]:
+    return list(range(len(items)))
 
 RERANK_CFG = {
     "orig_weight": _env_float("RERANK_ORIG_WEIGHT", 0.60),
@@ -167,7 +168,7 @@ RERANK_CFG = {
     "idf_mode": _env_str("RERANK_IDF_MODE", "log"),
 }
 
-def entity_based_reranking(query: str, chunks: List[Dict[str, Any]], orig_scores: List[float], embed_model=None) -> List[int]:
+def _rerank_entity_based(query: str, chunks: List[Dict[str, Any]], orig_scores: List[float], embed_model=None) -> List[int]:
     """Entity-based reranking implementation. embed_model is intentionally unused (kept for dispatcher compatibility)."""
     cfg = RERANK_CFG
     try:
@@ -197,9 +198,145 @@ def entity_based_reranking(query: str, chunks: List[Dict[str, Any]], orig_scores
     except Exception as e:
         print(f"[RERANK][ENTITY] failed: {e}")
         return list(range(len(chunks)))
+    
+def _load_custom_callable(spec: str) -> Optional[Callable[[str, List[Dict[str, Any]], List[float]], List[int]]]:
+    """
+    spec format: 'package.module:callable_name'
+    callable must accept (query, items, orig_scores) and return List[int]
+    """
+    if not spec or ":" not in spec:
+        return None
+    mod_name, func_name = spec.split(":", 1)
+    mod = importlib.import_module(mod_name)
+    fn = getattr(mod, func_name)
+    if not callable(fn):
+        return None
+    return fn
 
+def _rerank_via_custom(query: str, items: List[Dict[str, Any]], orig_scores: List[float], embed_model=None) -> List[int]:
+    spec = _env_str("RERANKER_SPEC", "")
+    try:
+        fn = _load_custom_callable(spec)
+        if fn is None:
+            return list(range(len(items)))
+        return fn(query, items, orig_scores, embed_model=embed_model)
+    except Exception:
+        return list(range(len(items)))
+    
+def _rerank_colbert(query: str, items: List[Dict[str, Any]], orig_scores: List[float], embed_model=None) -> List[int]:
+    """ColBERT reranker with error handling."""
+    try:
+        from src.reranking.colbert_reranking import rerank_colbert
+        return rerank_colbert(query, items, orig_scores)
+    except ImportError:
+        print("WARNING: ColBERT reranker not installed.")
+        return list(range(len(items)))
+    except Exception as e:
+        print(f"[RERANK][COLBERT] failed: {e}")
+        return list(range(len(items)))
 
-RERANKER_DISPATCH["entity"] = entity_based_reranking
+def _rerank_flag(query: str, items: List[Dict[str, Any]], orig_scores: List[float], embed_model=None) -> List[int]:
+    """FlagEmbedding reranker with error handling."""
+    try:
+        from src.reranking.flag_embedding_reranking import rerank_flag_embedding
+        return rerank_flag_embedding(query, items, orig_scores)
+    except ImportError:
+        print("WARNING: FlagEmbedding reranker not installed.")
+        return list(range(len(items)))
+    except Exception as e:
+        print(f"[RERANK][FLAG] failed: {e}")
+        return list(range(len(items)))
+
+def _rerank_llm(query: str, items: List[Dict[str, Any]], orig_scores: List[float], embed_model=None) -> List[int]:
+    """LLM-based reranker with error handling."""
+    try:
+        from src.reranking.llm_reranking import rerank_llm
+        return rerank_llm(query, items, orig_scores)
+    except ImportError:
+        print("WARNING: LLM reranker not installed.")
+        return list(range(len(items)))
+    except Exception as e:
+        print(f"[RERANK][LLM] failed: {e}")
+        return list(range(len(items)))
+
+# Optional: built-in hooks for 'rrf' and 'mmr' modes via custom modules.
+# You can point them with RERANKER_SPEC too; these are convenience fallbacks.
+def _rerank_rrf(query: str, items: List[Dict[str, Any]], orig_scores: List[float], embed_model=None) -> List[int]:
+    # Try to import a provided RRF reranker if you have one
+    spec = _env_str("RERANKER_SPEC", "")
+    if spec:
+        return _rerank_via_custom(query, items, orig_scores, embed_model=embed_model)
+    # else, keep order (or write a simple RRF here if you expose per-modality ranks in meta)
+    return list(range(len(items)))
+
+def _rerank_mmr(query: str, items: List[Dict[str, Any]], orig_scores: List[float], embed_model=None) -> List[int]:
+    spec = _env_str("RERANKER_SPEC", "")
+    if spec:
+        return _rerank_via_custom(query, items, orig_scores, embed_model=embed_model)
+    return list(range(len(items)))
+
+def _rerank_cohere_wrapper(query: str, items: List[Dict[str, Any]], orig_scores: List[float], embed_model=None) -> List[int]:
+    """
+    Wrapper for Cohere reranker.
+    Limits top_n to a reasonable number to reduce cost and latency.
+    """
+    try:
+        from src.reranking.cohere_reranking import rerank_cohere
+    except ImportError:
+        print("WARNING: Cohere reranker not installed.")
+        return list(range(len(items)))
+
+    # Limit top_n: at most 2x FINAL_K or all items if fewer
+    top_n = min(FINAL_K * 2, len(items))
+    return rerank_cohere(query, items, top_n=top_n)
+
+# Dispatcher
+def _get_reranker() -> Callable:
+    """
+    Returns the appropriate reranker function based on RERANKER_MODE env var.
+    Supported modes:
+    - none/off: no reranking
+    - entity/entity_based: entity-aware reranking
+    - colbert: ColBERT reranking
+    - flag/flag_embedding: FlagEmbedding reranking
+    - llm/gpt: LLM-based reranking
+    - rrf: Reciprocal Rank Fusion
+    - mmr: Maximal Marginal Relevance
+    - custom: custom reranker specified via RERANKER_SPEC
+    """
+    mode = _env_str("RERANKER_MODE", "none").lower()
+    
+    if mode in ("none", "", "off"):
+        return _rerank_none
+    
+    if mode in ("entity", "entity_based", "entity-aware", "entity_aware"):
+        return _rerank_entity_based
+    
+    if mode in ("colbert", "colbertv2"):
+        return _rerank_colbert 
+
+    if mode in ("flag", "flag_embedding", "flagembedding", "bge"):
+        return _rerank_flag 
+
+    if mode in ("llm", "gpt", "llm_rerank"):
+        return _rerank_llm
+    
+    if mode in ("cohere", "cohererank"):
+        return _rerank_cohere_wrapper
+    
+    if mode == "rrf":
+        return _rerank_rrf
+    
+    if mode == "mmr":
+        return _rerank_mmr
+    
+    if mode in ("custom",):
+        return _rerank_via_custom
+    
+    # unknown -> no-op with warning
+    print(f"WARNING: Unknown RERANKER_MODE '{mode}', using no reranking")
+    return _rerank_none
+
 
 # ----------------------Embedding Model Initialization-----------
 def initialize_embedding_model():
@@ -259,7 +396,7 @@ def hybrid_retrieve_QFR(query: str, k: int = RETRIEVE_TOP_K, sparse_k: int = SPA
 
 # ----------------------Retrieval + Postfilter + Rerank Pipeline----
 def retrieve_and_process_chunks(query: str, embed_model: Any, k: int = RETRIEVE_TOP_K, sparse_k: int = SPARSE_TOP_K,
-                                final_k: int = FINAL_K, postfilter_mode: str = "none", reranker_mode: str = "none") -> List[Dict[str, Any]]:
+                                final_k: int = FINAL_K, postfilter_mode: str = "none") -> List[Dict[str, Any]]:
     """Retrieve chunks using hybrid search, apply post-filtering and reranking. Returns final_k chunks in dictionary format."""
     try:
         chunks = hybrid_retrieve_QFR(query, k=k, sparse_k=sparse_k)
@@ -283,7 +420,7 @@ def retrieve_and_process_chunks(query: str, embed_model: Any, k: int = RETRIEVE_
             print(f"Post-filtering failed: {e}, continuing without it")
 
     # Apply reranking if enabled
-    reranker_fn = RERANKER_DISPATCH.get(reranker_mode.lower(), RERANKER_DISPATCH["none"])
+    reranker_fn = _get_reranker()
     try:
         order = reranker_fn(query, chunks, orig_scores, embed_model)
         if not isinstance(order, list) or len(order) != len(chunks):
@@ -463,8 +600,7 @@ def evaluate_retrieval(embed_model) -> float:
                 k=RETRIEVE_TOP_K,
                 sparse_k=SPARSE_TOP_K,
                 final_k=RETRIEVE_TOP_K,  # get all retrieved for pretrim
-                postfilter_mode="none",
-                reranker_mode="none"
+                postfilter_mode="none"
             )
         except Exception as e:
             eval_stats.retrieval_errors += 1
@@ -493,8 +629,7 @@ def evaluate_retrieval(embed_model) -> float:
             k=RETRIEVE_TOP_K,
             sparse_k=SPARSE_TOP_K,
             final_k=FINAL_K,
-            postfilter_mode=postfilter_mode,
-            reranker_mode=reranker_mode
+            postfilter_mode=postfilter_mode
         )
 
         # Step 3: Map processed chunks to sections and build retrieved_context
