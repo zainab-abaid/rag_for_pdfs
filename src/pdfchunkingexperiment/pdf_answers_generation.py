@@ -3,17 +3,17 @@
 Answer Generation Script
 
 This script:
-1. Reads the retrieval log CSV (from retrieve_pdf_chunks.py)
+1. Reads the retrieval log CSV (from pdf_chunks_retrieval.py)
 2. For each query, generates an answer using the retrieved contexts
-3. Saves generated answers to a separate log file (ANSWER_PDF_LOG_CSV)
+3. Saves generated answers to a separate log file. This file will be automatically created through script, no need to set it via .env file 
 
 Environment Variables (REQUIRED):
     PDF_RETRIEVAL_LOG_CSV: Path to retrieval log CSV
-    ANSWER_PDF_LOG_CSV: Path to save generated answers
+    CHUNKING_STRATEGY: Chunking strategy used (e.g., "recursive", "fixed", etc.) to create output filename
 
 Optional Environment Variables:
     USE_GROQ: 'true' to use Groq API
-    ANSWER_MODEL: Model to use for answer generation (OpenAI/Gemini)
+    ANSWER_MODEL: Model to use for answer generation (OpenAI/Gemini) and also used to create output filename
     GROQ_MODEL: Model to use for Groq (if USE_GROQ=true)
     ANSWER_MAX_TOKENS: Max tokens for answer generation (default: 500)
 """
@@ -56,9 +56,11 @@ try:
 except ImportError:
     Groq = None
 
-ANSWER_PDF_LOG_CSV = os.environ.get("ANSWER_PDF_LOG_CSV", "logs/answers_groq_meta_llama_query_dataset_with_qa.csv")
+CHUNKING_STRATEGY = os.environ.get("CHUNKING_STRATEGY", "recursive")
+ANSWER_MODEL= os.environ.get("ANSWER_MODEL", "gpt-4o")
 ANSWER_MAX_TOKENS = int(os.environ.get("ANSWER_MAX_TOKENS", "500"))
-PDF_RETRIEVAL_LOG_CSV = os.environ.get("PDF_RETRIEVAL_LOG_CSV", "logs/pdf_retrieval_log.csv")
+base_csv = os.environ.get("PDF_RETRIEVAL_LOG_CSV", "logs/pdf_retrieval_log.csv")
+PDF_RETRIEVAL_LOG_CSV = base_csv.replace(".csv", f"_{CHUNKING_STRATEGY}.csv")
 
 def is_gemini_model(model: str) -> bool:
     return bool(model and model.lower().startswith("gemini-"))
@@ -111,7 +113,6 @@ def extract_context_text(retrieved_context_json: str) -> str:
         return ""
 
 
-
 def is_retryable_error(error: Exception) -> bool:
     """Check for retryable errors"""
     msg = str(error).lower()
@@ -129,12 +130,10 @@ def is_retryable_error(error: Exception) -> bool:
         ]
     )
 
-
 def exponential_backoff_sleep(attempt: int, base_delay: float = 10.0, max_delay: float = 120.0):
     delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
     jitter = delay * 0.2 * random.random()
     time.sleep(delay + jitter)
-
 
 def generate_answer_openai(
     query: str, context: str, client: Any, model: str, max_tokens: int, max_retries: int = 5
@@ -291,14 +290,21 @@ def save_answer_log(path: Path, rows: List[Dict], model: str):
         for r in merged.values():
             writer.writerow(r)
 
+def resolve_answer_log_path(answer_model: str, chunking_strategy: str) -> str:
+    """Build filename: logs/answers_{ANSWER_MODEL}_query_dataset_with_qa_{CHUNKING_STRATEGY}.csv"""
+    if "/" in answer_model:
+        answer_model = answer_model.split("/")[0]
+    safe_model = answer_model.replace("/", "_").replace(" ", "_")
+    return f"logs/answers_{safe_model}_query_dataset_with_qa_{chunking_strategy}.csv"
 
 def main():
     if not PDF_RETRIEVAL_LOG_CSV or not Path(PDF_RETRIEVAL_LOG_CSV).exists():
         raise SystemExit("PDF Retrieval log CSV not found")
-    if not ANSWER_PDF_LOG_CSV:
-        raise SystemExit("ANSWER_PDF_LOG_CSV not set")
-
-    Path(ANSWER_PDF_LOG_CSV).parent.mkdir(parents=True, exist_ok=True)
+    
+    PDF_ANSWER_LOG_CSV = resolve_answer_log_path(ANSWER_MODEL, CHUNKING_STRATEGY)
+    Path(PDF_ANSWER_LOG_CSV).parent.mkdir(parents=True, exist_ok=True)
+    if not PDF_ANSWER_LOG_CSV:
+        raise SystemExit("PDF_ANSWER_LOG_CSV not set")
 
     use_groq = os.environ.get("USE_GROQ", os.environ.get("use_groq", "false")).lower() == "true"
     model = os.environ.get(
@@ -330,7 +336,7 @@ def main():
         reader = csv.DictReader(f)
         rows = list(reader)
 
-    existing_answers: Dict[Tuple[str, str], str] = load_existing_answers(Path(ANSWER_PDF_LOG_CSV), model_filter=model)
+    existing_answers: Dict[Tuple[str, str], str] = load_existing_answers(Path(PDF_ANSWER_LOG_CSV), model_filter=model)
     new_answers: List[Dict[str, str]] = []
 
     total = len(rows)
@@ -364,8 +370,8 @@ def main():
         print(f"[{idx}/{total}] Generated answer | {question[:60]}...")
 
     if new_answers:
-        save_answer_log(Path(ANSWER_PDF_LOG_CSV), new_answers, model)
-        print(f"\nSaved {len(new_answers)} new answers to {ANSWER_PDF_LOG_CSV} (model: {model})")
+        save_answer_log(Path(PDF_ANSWER_LOG_CSV), new_answers, model)
+        print(f"\nSaved {len(new_answers)} new answers to {PDF_ANSWER_LOG_CSV} (model: {model})")
 
 
 if __name__ == "__main__":

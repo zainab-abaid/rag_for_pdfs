@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Create HNSW indexes on vector columns for fast similarity search.
+Create HNSW indexes on vector columns for fast similarity search. This script is Optional.
 
 HNSW (Hierarchical Navigable Small World) indexes are much faster than
 sequential scans for vector similarity queries. This script creates
@@ -17,7 +17,7 @@ Environment Variables (required):
   PG_PORT: PostgreSQL port (default: 5432)
   PG_DB: Database name
   PG_SCHEMA: Schema name
-  PG_TABLE: Table name (default: idx_section_based_chunking)
+  PG_TABLE_PDF: Table name (default: pdf_chunks)
   PG_USER: Database user
   PG_PASSWORD: Database password
   HNSW_M: Number of connections per layer (default: 16)
@@ -47,7 +47,7 @@ PG_HOST = os.environ.get("PG_HOST", "localhost")
 PG_PORT = int(os.environ.get("PG_PORT", "5432"))
 PG_DB = os.environ.get("PG_DB")
 PG_SCHEMA = os.environ.get("PG_SCHEMA")
-PG_TABLE = os.environ.get("PG_TABLE", "idx_section_based_chunking")
+PG_TABLE_PDF = os.environ.get("PG_TABLE_PDF", "pdf_chunks")
 PG_USER = os.environ.get("PG_USER")
 PG_PASSWORD = os.environ.get("PG_PASSWORD", "")
 
@@ -228,7 +228,7 @@ def main():
     print(f"Host: {PG_HOST}:{PG_PORT}")
     print(f"Database: {PG_DB}")
     print(f"Schema: {PG_SCHEMA}")
-    print(f"Table: {PG_TABLE}")
+    print(f"Table: {PG_TABLE_PDF}")
     if not args.check:
         print(f"HNSW Parameters: m={HNSW_M}, ef_construction={HNSW_EF_CONSTRUCTION}")
     print("=" * 70)
@@ -243,11 +243,11 @@ def main():
             password=PG_PASSWORD
         ) as conn:
             # Find the actual table
-            actual_table = check_data_table(conn, PG_SCHEMA, PG_TABLE)
+            actual_table = check_data_table(conn, PG_SCHEMA, PG_TABLE_PDF)
             if not actual_table:
-                print(f"[ERROR] Table '{PG_SCHEMA}.{PG_TABLE}' or '{PG_SCHEMA}.data_{PG_TABLE}' not found!")
+                print(f"[ERROR] Table '{PG_SCHEMA}.{PG_TABLE_PDF}' or '{PG_SCHEMA}.data_{PG_TABLE_PDF}' not found!")
                 print("\nMake sure you've run ingestion first:")
-                print("  python src/ingestion/ingest_section_chunks.py")
+                print("  python src/pdfchunkingexperiment/pdf_chunks_ingestion.py")
                 sys.exit(1)
             
             print(f"[OK] Found table: {PG_SCHEMA}.{actual_table}")
@@ -256,7 +256,7 @@ def main():
             # Get vector columns
             vector_cols = get_vector_columns(conn, PG_SCHEMA, actual_table)
             if not vector_cols:
-                print(f"[ERROR] No vector columns found in table {PG_SCHEMA}.{actual_table}!")
+                print("[ERROR] No vector columns found in table!")
                 sys.exit(1)
             
             print(f"[OK] Found {len(vector_cols)} vector column(s): {', '.join(vector_cols)}")
@@ -270,7 +270,7 @@ def main():
                 all_exist = True
                 for col in vector_cols:
                     exists = index_status[col]
-                    status = "[OK] EXISTS" if exists else "[ERROR] MISSING"
+                    status = "[OK] EXISTS" if exists else "[FAIL] MISSING"
                     print(f"  {col}: {status}")
                     if not exists:
                         all_exist = False
@@ -298,7 +298,7 @@ def main():
                     print("[WARNING] Some HNSW indexes are missing. This will slow down vector searches.")
                     print()
                     print("To create missing indexes, run:")
-                    print("  python src/setup/create_hnsw_indexes.py")
+                    print("  python src/pdfchunkingexperiment/pdf_create_hnsw_indexes.py")
                 print("=" * 70)
             else:
                 # Create mode
@@ -323,7 +323,7 @@ def main():
                 print("=" * 70)
                 print()
                 print("To verify indexes, run:")
-                print("  python src/setup/create_hnsw_indexes.py --check")
+                print("  python src/pdfchunkingexperiment/pdf_create_hnsw_indexes.py --check")
 
     except psycopg.Error as e:
         print(f"ERROR: Database operation failed: {e}")

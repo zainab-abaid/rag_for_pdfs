@@ -3,18 +3,18 @@
 Answer Evaluation Script
 
 This script:
-1. Reads the retrieval log CSV (from retrieve_pdf_chunks.py)
+1. Reads the retrieval log CSV (from pdf_chunks_retrieval.py)
 2. Loads generated answers from the answer log CSV
 3. Compares generated answers against ground truth using an LLM judge (gpt-4o)
 4. Outputs evaluation results with judge scores (0/1) and statistics
 
 Usage:
-    uv run python src/evaluation/evaluate_answers.py
+    uv run python src/pdfchunkingexperiment/pdf_answers_evaluation.py
 
 Environment Variables (REQUIRED):
-    PDF_RETRIEVAL_LOG_CSV: Path to retrieval log CSV (from retrieve_pdf_chunks.py)
-    ANSWER_PDF_LOG_CSV: Path to answer log CSV (from generate_pdf_answers.py)
-    ANSWER_PDF_EVAL_OUTPUT_CSV or answer_pdf_eval_output_csv: Output path for evaluation results (e.g., logs/pdf_answer_eval_log.csv)
+    PDF_RETRIEVAL_LOG_CSV: Path to retrieval log CSV (from pdf_chunks_retrieval.py)
+    CHUNKING_STRATEGY: Chunking strategy used (e.g., "recursive", "fixed", etc.) to create answer evaluation filename
+    ANSWER_MODEL: Model to use for answer generation (OpenAI/Gemini) and also used to create answer evaluation filename
     OPENAI_API_KEY: Required for API calls (when USE_GROQ=false)
     GROQ_API_KEY: Required for API calls (when USE_GROQ=true)
 
@@ -56,6 +56,10 @@ try:
 except ImportError:
     Groq = None
 
+ANSWER_MODEL = os.environ.get("ANSWER_MODEL", "default_model")
+CHUNKING_STRATEGY = os.environ.get("CHUNKING_STRATEGY", "recursive")
+base_csv = os.environ.get("PDF_RETRIEVAL_LOG_CSV", "logs/pdf_retrieval_log.csv")
+PDF_RETRIEVAL_LOG_CSV = base_csv.replace(".csv", f"_{CHUNKING_STRATEGY}.csv")
 
 def get_openai_client() -> OpenAI:
     """Get OpenAI client from environment."""
@@ -205,26 +209,31 @@ def load_answer_log(answer_log_path: Path) -> Dict[str, str]:
     
     return answers
 
+def resolve_answer_log_path(answer_model: str, chunking_strategy: str) -> str:
+    """Build filename: logs/answers_{ANSWER_MODEL}_query_dataset_with_qa_{CHUNKING_STRATEGY}.csv"""
+    if "/" in answer_model:
+        answer_model = answer_model.split("/")[0]
+    safe_model = answer_model.replace("/", "_").replace(" ", "_")
+    return f"logs/answers_{safe_model}_query_dataset_with_qa_{chunking_strategy}.csv"
+
+def resolve_answer_eval_log_path(answer_model: str, chunking_strategy: str) -> str:
+    """Build filename: logs/pdf_answers_eval_log_{ANSWER_MODEL}_{CHUNKING_STRATEGY}.csv"""
+    if "/" in answer_model:
+        answer_model = answer_model.split("/")[0]
+    safe_model = answer_model.replace("/", "_").replace(" ", "_")
+    return f"logs/pdf_answers_eval_log_{safe_model}_{chunking_strategy}.csv"
 
 def main():
-    # REQUIRED: PDF_retrieval_log_csv (retrieval log from retrieve_and_stitch.py OR dataset CSV for ground truth)
-    # For Gemini evaluation, you can point this to the dataset CSV which has question/answer columns
-    log_path = get_env_path("PDF_RETRIEVAL_LOG_CSV", "pdf_retrieval_log_csv")
-    if not log_path:
-        raise SystemExit("ERROR: PDF_RETRIEVAL_LOG_CSV or pdf_retrieval_log_csv environment variable is required.\n"
-                        "Set it to the path of your retrieval log CSV file (from retrieve_and_stitch.py)\n"
-                        "OR to your dataset CSV file (for Gemini evaluation, which has question/answer columns).")
-    if not Path(log_path).exists():
-        raise SystemExit(f"ERROR: Retrieval log file not found: {log_path!r}")
+    # REQUIRED: PDF_retrieval_log_csv (retrieval log from pdf_chunks_retrieval.py)
+    if not Path(PDF_RETRIEVAL_LOG_CSV).exists():
+        raise SystemExit(f"ERROR: PDF Retrieval log CSV not found: {PDF_RETRIEVAL_LOG_CSV!r}\n"
+                        "Run pdf_chunks_retrieval.py first to create the answer log.")
     
-    # REQUIRED: ANSWER_PDF_LOG_CSV (generated answers from generate_answers.py OR gemini_filesearch.py)
-    answer_log_path = get_env_path("ANSWER_PDF_LOG_CSV", "answer_pdf_log_csv")
-    if not answer_log_path:
-        raise SystemExit("ERROR: ANSWER_PDF_LOG_CSV or answer_pdf_log_csv environment variable is required.\n"
-                        "Set it to the path of your answer log CSV file (from generate_answers.py or gemini_filesearch.py).")
+    # REQUIRED: answer_log_path (generated answers from pdf_answers_generation.p)
+    answer_log_path = resolve_answer_log_path(ANSWER_MODEL, CHUNKING_STRATEGY)
     if not Path(answer_log_path).exists():
         raise SystemExit(f"ERROR: Answer log file not found: {answer_log_path!r}\n"
-                        "Run generate_answers.py or gemini_filesearch.py first to create the answer log.")
+                        "Run pdf_answers_generation.py first to create the answer log.")
     
     # Check if Groq should be used
     use_groq = (os.getenv("USE_GROQ") or os.getenv("use_groq") or "").strip().lower() == "true"
@@ -240,16 +249,14 @@ def main():
     else:
         judge_model = os.getenv("JUDGE_MODEL", "gpt-4o").strip() or "gpt-4o"
     
-    # REQUIRED: ANSWER_PDF_EVAL_OUTPUT_CSV (evaluation output path)
-    eval_out = get_env_path("ANSWER_PDF_EVAL_OUTPUT_CSV", "answer_pdf_eval_output_csv")
-    if not eval_out:
-        raise SystemExit("ERROR: ANSWER_PDF_EVAL_OUTPUT_CSV or answer_pdf_eval_output_csv environment variable is required.\n"
-                        "Set it to the path where you want to save evaluation results (e.g., logs/answer_eval_log.csv).")
-    
+    # Ensure folder exists
+    eval_out = resolve_answer_eval_log_path(ANSWER_MODEL, CHUNKING_STRATEGY)
+    Path(eval_out).parent.mkdir(parents=True, exist_ok=True)
+
     print("=" * 80)
     print("ANSWER EVALUATION")
     print("=" * 80)
-    print(f"Retrieval log file  : {log_path}")
+    print(f"Retrieval log file  : {PDF_RETRIEVAL_LOG_CSV}")
     print(f"Answer log file     : {answer_log_path}")
     print(f"Evaluation output   : {eval_out}")
     print(f"Judge model         : {judge_model}")
@@ -265,7 +272,7 @@ def main():
     
     # Load retrieval log
     log_rows = []
-    with open(log_path, "r", encoding="utf-8") as f:
+    with open(PDF_RETRIEVAL_LOG_CSV, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         required = {"question", "answer"}
         missing = required - set(reader.fieldnames or [])
@@ -328,7 +335,7 @@ def main():
             writer.writerow(out_row)
             
             # Progress
-            status = "✓" if judge_score == 1 else "✗"
+            status = "[OK]" if judge_score == 1 else "[FAIL]"
             # Show error details if score is 0 and there's an error in reasoning
             error_indicator = ""
             if judge_score == 0 and "error" in judge_reasoning.lower():

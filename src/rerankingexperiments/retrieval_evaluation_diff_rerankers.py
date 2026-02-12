@@ -1,4 +1,22 @@
 #!/usr/bin/env python3
+"""
+Retrieval Evaluation Script
+
+This script evaluates the retrieval performance of different reranking strategies by comparing the retrieved contexts against ground truth data.
+
+Usage:
+    uv run python src/rerankingexperiments/retrieval_evaluation_diff_rerankers.py
+
+Environment Variables (REQUIRED):
+    RERANKER_MODE: The reranking mode to evaluate (e.g., `entity`, `colbert`, `none`).
+    DATASET_QUERIES: Path to the ground truth dataset CSV file (e.g., `data/questions_answers/query_dataset_with_qa.csv`).
+    RETRIEVAL_LOG_CSV: Path to the retrieval log CSV file (e.g., `logs/retrieval_log_TOPK5_none.csv`).
+    RETRIEVAL_EVAL_OUTPUT_CSV: Path to save the evaluation results (e.g., `logs/retrieval_eval_log_TOPK5_none.csv`).
+
+    The script reads the ground truth dataset and the retrieval log, compares the retrieved contexts against the ground truth
+    using both ID-based and text-based matching, and outputs evaluation metrics including hit rates and rank statistics.
+"""
+
 import os
 import json
 import statistics as stats
@@ -261,7 +279,7 @@ def main():
     def pct(n):
         return 0.0 if total == 0 else round(100.0 * n / total, 2)
 
-    print("\n=== Retrieval Evaluation ===")
+    print("\n=== Retrieval Evaluation Summary ===")
     print(f"Dataset file        : {dataset_path}")
     print(f"Reranker mode        : {reranker_mode}")
     print(f"Retrieval log file  : {log_path}")

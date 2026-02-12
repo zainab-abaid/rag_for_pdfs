@@ -27,6 +27,10 @@ dependencies = [
   "rapidfuzz>=3.0.0,<4.0.0",
   "ragatouille>=0.0.9",
   "FlagEmbedding>=1.3.5",
+  "cohere==5.20.2",
+  "fastavro==1.12.1",
+  "types-requests==2.32.4.20260107",
+  "ratelimit==2.2.1",
 
 ]
 

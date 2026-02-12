@@ -1,34 +1,33 @@
 #!/usr/bin/env python3
 """
-Hybrid retrieval + stitching for section-wise chunks stored in pgvector.
+Hybrid Retrieval and Reranking Script
 
-This version:
-- Assembles an entire section into ONE block string.
-- Keeps breadcrumb/title once per section; strips from subsequent splits.
-- No '-----' inside an assembled section.
-- Final de-dup of assembled sections.
-- Applies FINAL_K postprocessing cap.
-- Logs retrieved_context as a JSON list of assembled sections.
+This script performs hybrid retrieval and reranking for section-wise chunks stored in a PostgreSQL database with pgvector.
+It retrieves relevant sections based on a query, applies post-filtering and reranking strategies, and logs the results for 
+further evaluation.
 
-Env:
-  PG_HOST, PG_PORT, PG_DB, PG_SCHEMA, PG_USER, PG_PASSWORD
-  PG_TABLE
-  TEXT_SEARCH_CONFIG
-  EMBED_MODEL, EMBED_DIM
+Usage:
+    uv run python src/rerankingexperiments/retrieve_with_diff_rerankers.py
 
-  # retrieval knobs
-  RETRIEVE_TOP_K=30        # initial dense top_k for hybrid
-  SPARSE_TOP_K=30          # BM25 candidates for hybrid
-  FINAL_K=5                # final number of assembled sections to return/log per query
+Environment Variables (REQUIRED):
+    PG_HOST, PG_PORT, PG_DB, PG_SCHEMA, PG_USER, PG_PASSWORD: PostgreSQL connection details.
+    PG_TABLE: Name of the table containing section-based chunks.
+    DATASET_QUERIES: Path to the input dataset CSV file (e.g., `data/query_dataset_with_qa.csv`).
+    RETRIEVAL_LOG_CSV: Path to save the retrieval log (e.g., `logs/retrieval_log_TOPK5_none.csv`).
+    RERANKER_MODE: Reranking strategy to use (e.g., `none`, `entity`, `colbert`, `mmr`, `llm`, `flag`).
+    POSTFILTER_MODE: Post-filtering strategy to use (e.g., `none`, `soft`, `hard`).
 
-  # dataset paths
-  DATASET_QUERIES=./data/manual_queries_from_chunks.csv
-  RETRIEVAL_LOG_CSV=logs/retrieval_log.csv  # REQUIRED: where to save retrieval log
-  
-  # REQUIRED: configuration (no defaults - must be set explicitly)
-  RERANKER_MODE=none|entity|colbert|flag|llm|rrf|mmr|custom  # REQUIRED: reranker mode
-  POSTFILTER_MODE=none|soft|hard            # REQUIRED: postfilter mode
+Environment Variables (OPTIONAL):
+    RETRIEVE_TOP_K: Number of top results to retrieve in the initial dense search (default: 30).
+    SPARSE_TOP_K: Number of top results to retrieve in the sparse search (default: 30).
+    FINAL_K: Number of final results to return after reranking and trimming (default: 5).
+    EMBED_MODEL, EMBED_DIM: Embedding model and dimensions for vector search.
+
+Outputs:
+    - Logs the retrieved contexts and metadata to the specified `RETRIEVAL_LOG_CSV` file.
+    - Includes detailed telemetry such as ground truth ranks, post-filtering hits, and reranking results.
 """
+
 from __future__ import annotations
 import importlib
 import os, json, csv, re
@@ -70,8 +69,6 @@ SPARSE_TOP_K   = int(os.environ.get("SPARSE_TOP_K",   "30"))
 FINAL_K = int(os.environ.get("FINAL_K", "5"))
 
 DATASET_QUERIES = os.environ.get("dataset_queries", "./data/manual_queries_from_chunks.csv")
-# Default output to logs/ directory with sensible naming
-RETRIEVAL_LOG_CSV = os.environ.get("RETRIEVAL_LOG_CSV") or os.environ.get("retrieval_log_csv") or None  # Will be set in demo() based on dataset name
 
 # Optional: set embed model if not configured globally elsewhere
 try:
@@ -197,6 +194,21 @@ def _rerank_mmr(query: str, items: List[Dict[str, Any]], orig_scores: List[float
         return _rerank_via_custom(query, items, orig_scores)
     return list(range(len(items)))
 
+def _rerank_cohere_wrapper(query: str, items: List[Dict[str, Any]], orig_scores: List[float]) -> List[int]:
+    """
+    Wrapper for Cohere reranker.
+    Limits top_n to a reasonable number to reduce cost and latency.
+    """
+    try:
+        from src.reranking.cohere_reranking import rerank_cohere
+    except ImportError:
+        print("WARNING: Cohere reranker not installed.")
+        return list(range(len(items)))
+
+    # Limit top_n: at most 2x FINAL_K or all items if fewer
+    top_n = min(FINAL_K * 2, len(items))
+    return rerank_cohere(query, items, top_n=top_n)
+
 # Dispatcher
 def _get_reranker() -> Callable[[str, List[Dict[str, Any]], List[float]], List[int]]:
     """
@@ -230,6 +242,9 @@ def _get_reranker() -> Callable[[str, List[Dict[str, Any]], List[float]], List[i
     if mode in ("llm", "gpt", "llm_rerank"):
         from src.reranking.llm_reranking import rerank_llm
         return rerank_llm
+    
+    if mode in ("cohere", "cohererank"):
+        return _rerank_cohere_wrapper
     
     if mode == "rrf":
         return _rerank_rrf
@@ -574,26 +589,26 @@ def debug_gt_tracking(query, gt_section_id, candidates, postfilter_candidates=No
     candidate_ids = [c['section_id'] for c in candidates]
     print(f"Hybrid/QFR candidates ({len(candidate_ids)}): {candidate_ids[:10]}{'...' if len(candidate_ids) > 10 else ''}")
     if gt_section_id in candidate_ids:
-        print(f"✅ GT found in hybrid/QFR candidates at index {candidate_ids.index(gt_section_id)}")
+        print(f"[OK] GT found in hybrid/QFR candidates at index {candidate_ids.index(gt_section_id)}")
     else:
-        print(f"❌ GT NOT found in hybrid/QFR candidates")
+        print(f"[ERROR] GT NOT found in hybrid/QFR candidates")
 
     # Stage 2: post-filter / trimming
     if postfilter_candidates is not None:
         pf_ids = [c['section_id'] for c in postfilter_candidates]
         print(f"Post-filter candidates ({len(pf_ids)}): {pf_ids[:10]}{'...' if len(pf_ids) > 10 else ''}")
         if gt_section_id in pf_ids:
-            print(f"✅ GT found after post-filter at index {pf_ids.index(gt_section_id)}")
+            print(f"[OK] GT found after post-filter at index {pf_ids.index(gt_section_id)}")
         else:
-            print(f"❌ GT NOT found after post-filter")
+            print(f"[ERROR] GT NOT found after post-filter")
 
     # Stage 3: after rerank
     if rerank_order is not None:
         reranked_ids = [candidates[i]['section_id'] for i in rerank_order]
         if gt_section_id in reranked_ids:
-            print(f"✅ GT found after rerank at index {reranked_ids.index(gt_section_id)}")
+            print(f"[OK] GT found after rerank at index {reranked_ids.index(gt_section_id)}")
         else:
-            print(f"❌ GT NOT found after rerank")
+            print(f"[ERROR] GT NOT found after rerank")
 
 
 

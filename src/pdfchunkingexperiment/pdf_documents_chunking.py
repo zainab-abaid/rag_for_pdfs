@@ -58,7 +58,7 @@ CONFIGURATION
 All dynamic values are controlled via environment variables:
 
 - PDF_DATA_DIR              : Root directory of input PDFs
-- PDF_PARSED_OUTPUT_DIR     : Root directory for output node files
+- PDF_PARSED_OUTPUT_DIR     : Root directory for output node files. Note: for each chunking strategy, a subdirectory will be created.
 - CHUNK_SIZE                : Chunk size for applicable strategies
 - CHUNK_OVERLAP             : Overlap between adjacent chunks
 - CHUNKING_STRATEGY         : Chunking strategy to use
@@ -82,11 +82,9 @@ from llama_index.core.node_parser import (
 )
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from llama_index.core.node_parser import LangchainNodeParser, SimpleNodeParser
+from llama_index.core.node_parser import LangchainNodeParser
 from llama_index.embeddings.openai import OpenAIEmbedding
-from llama_index.core.schema import BaseNode
 from src.catalog.drop_titles import DROP_TITLES
-from collections import defaultdict
 
 load_dotenv()
 
@@ -96,6 +94,8 @@ OUTPUT_DATA_DIR = os.getenv("PDF_PARSED_OUTPUT_DIR", "./data/pdf_node_chunks")
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", 800))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", 150))
 CHUNKING_STRATEGY = os.getenv("CHUNKING_STRATEGY", "recursive")
+EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-3-small")
+EMBED_DIM = int(os.getenv("EMBED_DIM", "1536"))
 
 #----------------------utility functions-----------------------
 
@@ -133,8 +133,8 @@ def get_node_parser(strategy: str):
             return TokenTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
         case "sentence":
             return SentenceSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
-        case "semantic": # this one will be expensive
-            embed_model = OpenAIEmbedding()
+        case "semantic": # this one will be expensive as it uses embedding model
+            embed_model = OpenAIEmbedding(model=EMBED_MODEL, dimensions=EMBED_DIM)
             return SemanticSplitterNodeParser(
                 embed_model=embed_model,
                 chunk_size=CHUNK_SIZE
@@ -150,60 +150,58 @@ def get_node_parser(strategy: str):
         
 
 #-------------------chunking pipeline--------------------
-def chunk_documents() -> List[BaseNode]:
-    """Main chunking pipeline: PDFs -> Documents -> Nodes"""
+def chunk_documents_incremental():
+    """Process PDFs one by one, skip already processed PDFs."""
     documents = load_pdfs(INPUT_DATA_DIR)
     parser = get_node_parser(CHUNKING_STRATEGY)
-
-    nodes: List[BaseNode] = []
-    raw_nodes = parser.get_nodes_from_documents(documents)
-
-    for index, node in enumerate(raw_nodes):
-        text = node.get_content()
-        if should_drop_titles(text):
-            continue
-
-        node.metadata.update(
-            {
-                "chunking_strategy": CHUNKING_STRATEGY,
-                "chunk_index": index,
-            }
-        )
-        nodes.append(node)
-
-    return nodes
-
-def save_nodes(nodes: List[BaseNode]):
-    """Saves nodes per PDF file, mirroring the input folder hierarchy. Each PDF is written once, collecting all its nodes before saving."""
-    # Group nodes by source PDF
-    nodes_by_pdf = defaultdict(list)
-    for node in nodes: 
-        source_file = node.metadata.get("source_file")
-        if source_file:
-            nodes_by_pdf[source_file].append(node)
     
-    # Save nodes per PDF
+    total_nodes = 0
     src_root = Path(INPUT_DATA_DIR).resolve()
     output_root = Path(OUTPUT_DATA_DIR).resolve() / CHUNKING_STRATEGY
-
-    for source_file, pdf_nodes in nodes_by_pdf.items():
-        source_path = Path(source_file).resolve()
+    
+    for doc in documents:
+        source_path = Path(doc.metadata.get("source_file")).resolve()
         rel_path = source_path.relative_to(src_root)
         out_dir = output_root / rel_path.parent
         out_dir.mkdir(parents=True, exist_ok=True)
-
         out_file = out_dir / f"{rel_path.stem}.pkl"
-        
+
+        # Skip if already processed
+        if out_file.exists():
+            print(f"Skipping {rel_path.name}, already processed")
+            continue
+
+        # Process nodes
+        doc_nodes = parser.get_nodes_from_documents([doc])
+        saved_nodes = []
+
+        for index, node in enumerate(doc_nodes):
+            text = node.get_content()
+            if should_drop_titles(text):
+                continue
+
+            node.metadata.update(
+                {
+                    "chunking_strategy": CHUNKING_STRATEGY,
+                    "chunk_index": index,
+                    "source_file": doc.metadata.get("source_file", "")
+                }
+            )
+            saved_nodes.append(node)
+
+        # Save nodes immediately
         with open(out_file, "wb") as f:
-            pickle.dump(pdf_nodes, f)
+            pickle.dump(saved_nodes, f)
 
-        print(f"Saved {len(pdf_nodes)} nodes for {rel_path.name} -> {out_file}")
+        print(f"Saved {len(saved_nodes)} nodes for {rel_path.name} -> {out_file}")
+        total_nodes += len(saved_nodes)
 
+    print(f"Total chunks created in this run: {total_nodes}")
+    return total_nodes
 
 if __name__ == "__main__":
-    nodes = chunk_documents()
+    nodes = chunk_documents_incremental()
     print(f"Total chunks created: {len(nodes)}")
-    save_nodes(nodes)
     
 
 
